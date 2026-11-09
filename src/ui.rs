@@ -104,7 +104,8 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::styled(" ✻ LockIn ", Style::default().fg(BG).bg(ORANGE).add_modifier(Modifier::BOLD)), Span::raw(" ")];
     for (i, (view, name)) in VIEWS.iter().enumerate() {
-        let label = format!(" {} {name} ", i + 1);
+        let waiting = app.drafts.iter().filter(|d| d.status == crate::drafts::READY).count();
+        let label = if *view == View::Tasks && waiting > 0 { format!(" {} {name} ✎{waiting} ", i + 1) } else { format!(" {} {name} ", i + 1) };
         let style = if *view == app.view {
             Style::default().fg(FG).bg(SEL).add_modifier(Modifier::BOLD)
         } else {
@@ -507,6 +508,9 @@ fn task_detail<'a>(t: &Task) -> Vec<Line<'a>> {
     if !t.action.is_empty() {
         l.push(label("moodle", t.action.clone(), MUTED));
     }
+    if !t.done && crate::app::assignment_id(&t.url).is_some() {
+        l.push(label("keys", "W Claude drafts it for you   Enter open in Moodle".to_string(), DIM));
+    }
     if t.done {
         let by = if t.done_by.as_deref() == Some("moodle") { "gone from Moodle's timeline" } else { "marked by you" };
         l.push(label("done", by.to_string(), GREEN));
@@ -545,6 +549,12 @@ fn draw_today(f: &mut Frame, app: &App, area: Rect) {
             brief.push(Line::from(Span::styled("No briefing yet.", st(MUTED))));
             brief.push(Line::from(Span::styled("Press Space then b, or wait for the 15:00 run.", st(DIM))));
         }
+    }
+    let waiting = app.drafts.iter().filter(|d| d.status == crate::drafts::READY).count();
+    if waiting > 0 {
+        brief.push(Line::default());
+        let what = if waiting == 1 { "1 assignment draft is".to_string() } else { format!("{waiting} assignment drafts are") };
+        brief.push(Line::from(vec![Span::styled(format!("✎ {what} waiting for you. "), st(YELLOW).add_modifier(Modifier::BOLD)), Span::styled("Space D opens them", st(MUTED))]));
     }
     if !app.inbox.is_empty() {
         brief.push(Line::default());
@@ -598,7 +608,7 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
     let tab = |name: String, on: bool| if on { Span::styled(format!(" {name} "), Style::default().fg(BG).bg(ORANGE).add_modifier(Modifier::BOLD)) } else { Span::styled(format!(" {name} "), st(MUTED)) };
     let drafts_label = if waiting > 0 { format!("Drafts ({waiting})") } else { "Drafts".to_string() };
     f.render_widget(
-        Paragraph::new(Line::from(vec![tab("Tasks".into(), !app.drafts_open), Span::raw(" "), tab(drafts_label, app.drafts_open), Span::styled("   [ ] switch", st(DIM))])),
+        Paragraph::new(Line::from(vec![tab("Tasks".into(), !app.drafts_open), Span::raw(" "), tab(drafts_label, app.drafts_open), Span::styled(if app.drafts_open { "   [ back to tasks   ? help" } else { "   ] drafts   ? help" }, st(DIM))])),
         bar,
     );
     if app.drafts_open {
@@ -626,7 +636,17 @@ fn draft_color(status: &str) -> Color {
     }
 }
 
+/// The keys for Drafts, always visible, since this tab is new and easy to forget.
+const DRAFT_KEYS: &[(&str, &str)] = &[("J K", "scroll"), ("Enter", "edit"), ("o", "view PDF"), ("r", "redo"), ("S", "submit"), ("dd", "discard"), ("[", "tasks"), ("?", "help")];
+
 fn draw_drafts(f: &mut Frame, app: &App, area: Rect) {
+    let [area, keys] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    let mut spans = Vec::new();
+    for (k, d) in DRAFT_KEYS {
+        spans.push(Span::styled(format!(" {k} "), st(ORANGE).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(format!("{d}  "), st(MUTED)));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), keys);
     let wide = area.width >= 100;
     let [list, detail] = if wide {
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area)
@@ -634,7 +654,7 @@ fn draw_drafts(f: &mut Frame, app: &App, area: Rect) {
         Layout::vertical([Constraint::Length((app.drafts.len() as u16 + 1).clamp(3, 8)), Constraint::Min(1)]).areas(area)
     };
     if app.drafts.is_empty() {
-        empty(f, list, "No drafts. Press W on a Moodle task, or text LockIn \"do\" and the task.");
+        empty(f, list, "No drafts yet. Claude writes one when you press W on a Moodle task in the task list ([ goes there), or when you text LockIn \"do RA 4\". You check it here and press S to hand it in.");
     } else {
         let width = list.width as usize;
         let rows = app
@@ -683,9 +703,16 @@ fn draw_drafts(f: &mut Frame, app: &App, area: Rect) {
         l.push(Line::default());
         l.push(Line::from(vec![Span::styled("Submitting accepts: ", st(YELLOW)), Span::styled(d.statement.clone(), st(MUTED))]));
     }
-    if d.status == crate::drafts::READY {
+    let next = match d.status.as_str() {
+        crate::drafts::READY => "Next: read it below, fix anything with Enter or r, then S to hand it in.",
+        crate::drafts::WORKING => "Claude is writing it. You get a notification when it's done.",
+        crate::drafts::FAILED => "Press r to try again, saying what to do differently, or dd to discard it.",
+        crate::drafts::SUBMITTED => "Handed in. Check it on Moodle with gx on the task.",
+        _ => "",
+    };
+    if !next.is_empty() {
         l.push(Line::default());
-        l.push(Line::from(Span::styled("Enter edit   o view   r redo with changes   S submit   dd discard", st(DIM))));
+        l.push(Line::from(Span::styled(next, st(MUTED))));
     }
     if !app.draft_preview.is_empty() {
         l.push(Line::default());
@@ -1841,6 +1868,7 @@ fn draw_books(f: &mut Frame, app: &App, area: Rect) {
 const LEADER_KEYS: &[(&str, &str)] = &[
     ("t", "today"),
     ("T", "tasks"),
+    ("D", "assignment drafts"),
     ("c", "calendar"),
     ("n", "notes"),
     ("f", "find note"),
@@ -1886,15 +1914,25 @@ J K  scroll the details pane    Tab, gt, gT  change tab   3gt  go to tab 3
 o  new task   e  edit title   D  set due date   x  done, or reopen
 + -  priority   dd  delete    u  undo           f  filter all, Moodle, mine
 zd  show finished   gx  open in browser   gf  focus on this task   L  learn it
-W  Claude drafts this Moodle assignment for you to check   [ ]  Tasks, Drafts
+W  Claude drafts this Moodle assignment for you (see Drafts below)
 Enter on a Moodle task opens it in the Moodle CLI, where u uploads files.
 Enter on your own task edits its notes.
 
-In Drafts:  Enter edit   o view the PDF   r redo with changes   dd discard
-S  submit to Moodle for grading, after you confirm. Only this computer can submit.
-
 Quick add:  Read chapter 4 @fri 18:00 !! #AM ~45m
 Dates:  today, tom, fri, +3d, +4h, 14.11., 2026-12-01 08:15, 21:00
+
+# Drafts (Claude does an assignment, you check it and hand it in)
+Get there:  Space D, or :drafts, or in Tasks press ]   ([ goes back to tasks)
+The Tasks tab shows ✎2 when 2 drafts are waiting.
+1. Ask for one: W on a Moodle task, or text your phone topic \"do RA 4\".
+2. Claude writes it in a minute or a few. You get a notification, on the phone
+   with the text and the PDF.
+3. Read it in Drafts. The Check part says what Claude wasn't sure of.
+   Enter  edit it (a PDF: edit its HTML, the PDF is remade when you close it)
+   o  view the PDF   r  ask Claude for changes   dd  discard   J K  scroll
+4. S  submits it to Moodle for grading. It asks first, and says which files it
+   replaces and which statement you accept. This can't be undone.
+Only this computer can submit. From the phone: drafts, redo 3 make it shorter.
 
 # Week
 h l  change day   j k  pick an item   H L or [ ]  change week   t  this week
@@ -1944,12 +1982,29 @@ j k  move   Enter or x  change   h l  step a value
 
 # Commands
 :sync   :brief   :add ...   :event ...   :note name   :daily   :habit name
-:focus 25   :stop   :filter moodle   :notify   :moodle   :pdf file   :week   :plan   :chats   :learn   :books   :settings   :q
+:drafts   :focus 25   :stop   :filter moodle   :notify   :moodle   :pdf file   :week   :plan   :chats   :learn   :books   :settings   :q
 
 # Texting LockIn from your phone
-Turn it on in Settings. Then write to your ntfy topic: add tasks and events, tick
-things off, sync, or ask Claude. It works with the app closed.
+Turn it on in Settings, then run lockin phone. Write to your ntfy topic: add tasks
+and events, tick things off, sync, do an assignment, or ask Claude. Send help for
+the list. It works with the app closed.
 ";
+
+/// Where the help starts when opened, so ? shows the part about the tab you're on.
+pub fn help_offset(view: View, drafts_open: bool) -> u16 {
+    let heading = match view {
+        View::Tasks if drafts_open => "# Drafts",
+        View::Today | View::Tasks => "# Tasks",
+        View::Week => "# Week",
+        View::Calendar => "# Calendar",
+        View::Notes => "# Notes",
+        View::Habits => "# Habits",
+        View::Focus => "# Focus",
+        View::Chats => "# Chats",
+        View::Settings => "# Settings",
+    };
+    HELP.lines().position(|l| l.starts_with(heading)).unwrap_or(0) as u16
+}
 
 fn draw_help(f: &mut Frame, app: &App, body: Rect) {
     let width = 78.min(body.width);
@@ -2556,8 +2611,10 @@ mod tests {
         let cfg = crate::config::load().unwrap();
         let mut app = App::new(cfg).unwrap();
         let (w, h) = (130u16, 34u16);
-        for (view, name) in VIEWS {
+        let drafts = (View::Tasks, "Drafts");
+        for (view, name) in VIEWS.into_iter().chain([drafts]) {
             app.view = view;
+            app.drafts_open = name == "Drafts";
             app.prepare();
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
             t.draw(|f| draw(f, &app)).unwrap();
@@ -2567,6 +2624,19 @@ mod tests {
                 println!("{}", row.iter().map(|c| c.symbol()).collect::<String>().trim_end());
             }
         }
+    }
+
+    #[test]
+    fn help_opens_at_the_tab_you_are_on() {
+        for (view, _) in VIEWS {
+            if view != View::Today {
+                assert!(help_offset(view, false) > 0, "{view:?} has a help section");
+            }
+        }
+        let drafts = help_offset(View::Tasks, true);
+        assert!(HELP.lines().nth(drafts as usize).unwrap().starts_with("# Drafts"));
+        assert!(HELP.contains("Space D"), "the help says how to get to Drafts");
+        assert!(LEADER_KEYS.iter().any(|(k, _)| *k == "D"));
     }
 
     #[test]

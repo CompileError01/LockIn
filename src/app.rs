@@ -278,7 +278,7 @@ pub struct App {
 }
 
 const COMMANDS: &[&str] = &[
-    "add", "brief", "books", "calendar", "chats", "config", "daily", "event", "filter", "focus", "habit", "habits", "help", "learn", "moodle", "note",
+    "add", "brief", "books", "calendar", "chats", "config", "daily", "drafts", "event", "filter", "focus", "habit", "habits", "help", "learn", "moodle", "note",
     "notes", "notify", "pdf", "plan", "q", "qa", "settings", "stop", "sync", "tasks", "today", "w", "week", "wq",
 ];
 
@@ -842,6 +842,19 @@ impl App {
         self.drafts.get(self.sel_drafts).cloned()
     }
 
+    fn open_help(&mut self) {
+        self.help_open = true;
+        self.help_scroll = crate::ui::help_offset(self.view, self.drafts_open);
+    }
+
+    fn open_drafts(&mut self) {
+        self.switch(View::Tasks);
+        self.toggle_drafts(true);
+        if self.drafts.is_empty() {
+            self.info("No drafts yet. Press [ for your tasks, then W on a Moodle assignment");
+        }
+    }
+
     fn toggle_drafts(&mut self, open: bool) {
         self.drafts_open = open;
         self.preview_scroll = 0;
@@ -890,11 +903,11 @@ impl App {
         let cfg = self.cfg.clone();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let r = crate::drafts::run(&cfg, id, feedback.as_deref()).map(|()| "Draft ready in Tasks → Drafts".to_string()).map_err(|e| format!("Draft: {e}"));
+            let r = crate::drafts::run(&cfg, id, feedback.as_deref()).map(|()| "Draft ready. Space D shows it".to_string()).map_err(|e| format!("Draft: {e}"));
             let _ = tx.send(Bg::Draft(r));
         });
         self.toggle_drafts(true);
-        self.info("Writing a draft. It takes a few minutes, and you can keep working");
+        self.info("Claude is writing the draft here in Drafts. It takes a few minutes, and you can keep working. [ goes back to tasks");
         self.refresh();
     }
 
@@ -1343,6 +1356,7 @@ impl App {
             "week" => self.switch(View::Week),
             "plan" => self.start_plan(),
             "chats" => self.switch(View::Chats),
+            "drafts" | "draft" => self.open_drafts(),
             "books" => {
                 self.switch(View::Chats);
                 self.on_chats_key('B', 1);
@@ -1483,7 +1497,7 @@ impl App {
         match c {
             ':' => self.open_prompt(Prompt::Command, ""),
             '/' => self.open_prompt(Prompt::Search, ""),
-            '?' => self.help_open = true,
+            '?' => self.open_help(),
             ' ' | 'g' | 'd' | 'z' | 'Z' => self.pending = Some(c),
             'u' => self.undo_last(),
             _ => self.on_view_key(c, times),
@@ -1580,7 +1594,8 @@ impl App {
                 let r = self.open_daily();
                 self.attempt(r);
             }
-            (' ', '?') => self.help_open = true,
+            (' ', '?') => self.open_help(),
+            (' ', 'D') => self.open_drafts(),
             (' ', 'q') => self.try_quit(false),
             _ => {}
         }
