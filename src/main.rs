@@ -45,6 +45,8 @@ enum Cmd {
     /// Internal: talks to digi4school for the Chats tab, with the login on stdin
     #[command(hide = true)]
     BooksHelper { mode: String, title: Option<String> },
+    /// Describe digi4school's responses with no personal data, for fixing problems
+    BooksDebug,
     /// Send a test notification to the desktop and phone
     Notify,
     /// Install or update the daily systemd timer from your settings
@@ -121,6 +123,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Cmd::BooksHelper { .. }) => unreachable!("handled above"),
+        Some(Cmd::BooksDebug) => books::debug(&cfg.digi4school_email),
         Some(Cmd::Notify) => {
             let errors = services::notify_all(&cfg, "LockIn test", "Notifications are working.", false, false);
             for e in &errors {

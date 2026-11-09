@@ -72,6 +72,7 @@ pub enum Confirm {
     RestartLesson(usize),
     DeleteChat(i64, String),
     DeleteBook(PathBuf),
+    SaveBooksPassword,
     Quit,
 }
 
@@ -829,6 +830,12 @@ impl App {
                 let r = tutor::delete_session(&self.db, id);
                 self.attempt(r);
                 self.info(format!("Deleted {title}. Your files are untouched"));
+            }
+            Confirm::SaveBooksPassword => {
+                let r = self.save_books_password();
+                if let Err(e) = r {
+                    self.error(format!("Couldn't save the password: {e}"));
+                }
             }
             Confirm::DeleteBook(path) => {
                 let r = self.delete_book(&path);
@@ -2290,6 +2297,7 @@ impl App {
                     self.attempt(r);
                 }
                 EditFile => self.want_editor = Some(EditTarget::Config),
+                ForgetBooksPassword => self.forget_books_password(),
                 _ => {}
             },
         }

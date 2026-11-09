@@ -699,16 +699,17 @@ dependencies = [
 [[package]]
 name = "digi_download_core"
 version = "0.1.0"
-source = "git+https://github.com/digiDownload/digiDownload?rev=b3791215fbee86c80fc6304f925f8dc3ea9fecb8#b3791215fbee86c80fc6304f925f8dc3ea9fecb8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "chrono",
  "getset",
  "lopdf",
  "regex",
  "reqwest",
  "scraper",
  "serde",
+ "serde_json",
  "serde_urlencoded",
  "svg2pdf",
  "thiserror 2.0.21",

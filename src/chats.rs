@@ -50,6 +50,9 @@ pub struct ChatsState {
     pub book_sel: usize,
     /// Kept in memory only, for this run of the app, and never written anywhere.
     pub password: Option<String>,
+    /// The password in memory came from storage, so a rejected login should clear it there too.
+    pub password_saved: bool,
+    pub asked_to_save: bool,
     pub listing: bool,
     pub job: Option<BookJob>,
 }
@@ -76,6 +79,8 @@ impl Default for ChatsState {
             local: vec![],
             book_sel: 0,
             password: None,
+            password_saved: false,
+            asked_to_save: false,
             listing: false,
             job: None,
         }
@@ -381,6 +386,10 @@ impl App {
             return self.open_prompt(Prompt::BooksEmail, "");
         }
         if self.chats.password.is_none() {
+            self.chats.password = books::load_password(&self.cfg.digi4school_email);
+            self.chats.password_saved = self.chats.password.is_some();
+        }
+        if self.chats.password.is_none() {
             return self.open_prompt(Prompt::BooksPassword, "");
         }
         self.chats.listing = true;
@@ -479,7 +488,16 @@ impl App {
                 self.chats.listing = false;
                 self.chats.remote = serde_json::from_value(event["books"].clone()).unwrap_or_default();
                 self.chats.local = books::local_books();
-                self.info(format!("{} book(s) on your account. Enter downloads one", self.chats.remote.len()));
+                if self.chats.remote.is_empty() {
+                    self.error("digi4school listed no books that are still valid. Run lockin books-debug if that's wrong");
+                } else {
+                    self.info(format!("{} book(s) on your account. Enter downloads one", self.chats.remote.len()));
+                }
+                // A login that worked is the right moment to offer saving it.
+                if !self.chats.password_saved && !self.chats.asked_to_save && self.mode == Mode::Normal {
+                    self.chats.asked_to_save = true;
+                    self.mode = Mode::Confirm(Confirm::SaveBooksPassword);
+                }
             }
             Some("progress") => {
                 if let Some(job) = &mut self.chats.job {
@@ -505,6 +523,10 @@ impl App {
                 // A wrong password shouldn't be retried silently on the next try.
                 if message.starts_with("Login failed") {
                     self.chats.password = None;
+                    if self.chats.password_saved {
+                        books::forget_password(&self.cfg.digi4school_email);
+                        self.chats.password_saved = false;
+                    }
                 }
                 self.chats.listing = false;
                 self.chats.job = None;
@@ -512,6 +534,22 @@ impl App {
             }
         }
         self.clamp_chats();
+    }
+
+    pub fn save_books_password(&mut self) -> Result<()> {
+        let Some(password) = self.chats.password.clone() else { return Ok(()) };
+        let place = books::save_password(&self.cfg.digi4school_email, &password)?;
+        self.chats.password_saved = true;
+        self.info(format!("Password saved in {place}. Settings can forget it"));
+        Ok(())
+    }
+
+    pub fn forget_books_password(&mut self) {
+        books::forget_password(&self.cfg.digi4school_email);
+        self.chats.password = None;
+        self.chats.password_saved = false;
+        self.chats.asked_to_save = false;
+        self.info("Saved digi4school password removed");
     }
 
     pub fn delete_book(&mut self, path: &Path) -> Result<()> {

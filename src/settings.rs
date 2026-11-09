@@ -29,6 +29,7 @@ pub enum Key {
     RunDaily,
     SyncNow,
     TestNotify,
+    ForgetBooksPassword,
     EditFile,
 }
 
@@ -65,6 +66,7 @@ pub const ROWS: &[(&str, Key)] = &[
     ("Actions", Key::RunDaily),
     ("Actions", Key::SyncNow),
     ("Actions", Key::TestNotify),
+    ("Actions", Key::ForgetBooksPassword),
     ("Actions", Key::EditFile),
 ];
 
@@ -78,7 +80,7 @@ pub fn kind(key: Key) -> Kind {
         DailyEnabled | DailyCatchUp | DailyClaude | SyncOnOpen | Desktop | Phone | Icons => Kind::Toggle,
         DailyDays | SyncInterval | Model | TutorModel | TutorLanguage | FocusMinutes | BreakMinutes => Kind::Choice,
         DailyTimes | NtfyServer | NtfyTopic | AboutMe | Vault | NewNoteDir | Editor => Kind::Text,
-        RunDaily | SyncNow | TestNotify | EditFile => Kind::Action,
+        RunDaily | SyncNow | TestNotify | ForgetBooksPassword | EditFile => Kind::Action,
     }
 }
 
@@ -112,6 +114,7 @@ pub fn label(key: Key) -> &'static str {
         Key::RunDaily => "Run the daily job now",
         Key::SyncNow => "Sync Moodle now",
         Key::TestNotify => "Send a test notification",
+        Key::ForgetBooksPassword => "Forget digi4school password",
         Key::EditFile => "Open the config file",
     }
 }
@@ -144,7 +147,7 @@ pub fn value(cfg: &Config, key: Key) -> String {
         Key::NewNoteDir => cfg.new_note_dir.clone(),
         Key::Editor => cfg.editor.clone(),
         Key::Icons => on_off(cfg.nerd_icons),
-        Key::RunDaily | Key::SyncNow | Key::TestNotify | Key::EditFile => "press Enter".into(),
+        Key::RunDaily | Key::SyncNow | Key::TestNotify | Key::ForgetBooksPassword | Key::EditFile => "press Enter".into(),
     }
 }
 
@@ -174,6 +177,7 @@ pub fn help(key: Key) -> &'static str {
         Key::RunDaily => "Syncs, asks Claude and sends the notifications right now, exactly like a scheduled run.",
         Key::SyncNow => "Pulls from Moodle now, without using Claude.",
         Key::TestNotify => "Sends a test to every notification channel that's on.",
+        Key::ForgetBooksPassword => "Removes your saved digi4school password. LockIn asks for it again next time.",
         Key::EditFile => "Opens config.toml in your editor. Changes apply when you close it. If you change times there, run lockin install afterwards.",
     }
 }

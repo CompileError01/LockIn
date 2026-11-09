@@ -118,9 +118,13 @@ a number came from.
 Press `B` in the Chats tab, then `L` to log in with your digi4school account and see your books. Press
 Enter on one to download it, and add it to a chat like any other file.
 
-- Downloading goes through [digiDownload](https://github.com/digiDownload/digiDownload) (MIT licence).
-- Your email is saved in your settings. Your password isn't saved anywhere: LockIn keeps it in memory
-  until you quit, and asks again next time.
+- Downloading goes through a patched copy of [digiDownload](https://github.com/digiDownload/digiDownload)
+  (MIT licence), in `crates/digi_download_core`, updated for digi4school's current website.
+- Your email is saved in your settings. After a login that works, LockIn asks whether to save your
+  password: in your desktop keyring if you have one, otherwise in a file only you can read,
+  `~/.config/lockin/digi4school-password`, which isn't encrypted. If you say no, it stays in memory until
+  you quit. You can remove it in the Settings tab.
+- If the site changes again, `lockin books-debug` describes its responses with no personal data.
 - An interrupted download carries on from the last saved page.
 - Books go in `~/.local/share/lockin/books`, which only you can read. They're licensed to your account,
   so they stay out of this repo. Only download books you have access to, and don't share them. Pages you

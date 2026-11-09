@@ -3,7 +3,7 @@
 # It includes vendor/moodle when that exists on this machine.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
-parts=(Cargo.toml Cargo.lock README.md install.sh src)
+parts=(Cargo.toml Cargo.lock README.md install.sh src crates)
 [ -d vendor ] && parts+=(vendor)
 tar --create --gzip --file lockin.tar.gz --transform 's,^,lockin/,' "${parts[@]}"
 echo "Created $(pwd)/lockin.tar.gz ($(du -h lockin.tar.gz | cut -f1))"

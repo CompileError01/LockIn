@@ -221,6 +221,7 @@ fn draw_cmdline(f: &mut Frame, app: &App, area: Rect) {
                 Confirm::TrashNote(p) => format!("Move {} to the vault's .trash? (y/n)", p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
                 Confirm::DeleteHabit(_, n) => format!("Delete habit {n} and its history? (y/n)"),
                 Confirm::DeleteChat(_, title) => format!("Delete the chat {title} and its messages? Files stay. (y/n)"),
+                Confirm::SaveBooksPassword => "Save this digi4school password on this computer, so you aren't asked again? (y/n)".to_string(),
                 Confirm::DeleteBook(p) => format!("Delete {} from this computer? (y/n)", p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
                 Confirm::DeleteTutorNote(p) => format!("Delete the note {}? (y/n)", p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
                 Confirm::RestartLesson(_) => "Start this lesson over and erase its conversation? Claude's notes stay. (y/n)".to_string(),
@@ -1664,7 +1665,7 @@ fn draw_books(f: &mut Frame, app: &App, area: Rect) {
     }
     let account = if app.cfg.digi4school_email.is_empty() { "not set".to_string() } else { app.cfg.digi4school_email.clone() };
     lines.push(Line::from(vec![Span::styled("account  ", st(DIM)), Span::styled(account, st(MUTED))]));
-    let state = if app.chats.password.is_some() { "logged in until you quit" } else { "asked each time you open LockIn" };
+    let state = if app.chats.password_saved { "saved on this computer" } else if app.chats.password.is_some() { "in memory until you quit" } else { "not entered yet" };
     lines.push(Line::from(vec![Span::styled("password ", st(DIM)), Span::styled(state, st(MUTED))]));
     lines.push(Line::default());
     lines.extend(key_lines(&[("L", "log in, list your books"), ("Enter", "download or read"), ("x", "stop a download"), ("d", "delete from this computer"), ("h", "back")]));
@@ -2187,8 +2188,37 @@ mod tests {
         app.on_book_event(serde_json::json!({"event": "error", "message": "Login failed: bad login"}));
         assert!(app.chats.password.is_none());
         assert!(!app.chats.listing);
+        // A successful login offers to save it, and declining keeps it off the disk.
+        app.chats.password = Some("hunter2secret".into());
         app.on_book_event(serde_json::json!({"event": "books", "books": [{"title": "Physik 2", "year": 2025}]}));
         assert!(screen(&mut app, 120, 30).contains("Physik 2 (2025)"));
+        assert_eq!(app.mode, Mode::Confirm(Confirm::SaveBooksPassword));
+        press(&mut app, "n");
+        assert_eq!(crate::books::load_password("me@example.com"), None);
+        app.on_book_event(serde_json::json!({"event": "books", "books": [{"title": "Physik 2", "year": 2025}]}));
+        assert_eq!(app.mode, Mode::Normal, "it asks once per run");
+        // Saving makes a file only you can read, and the next login uses it without asking.
+        app.chats.asked_to_save = false;
+        app.on_book_event(serde_json::json!({"event": "books", "books": [{"title": "Physik 2", "year": 2025}]}));
+        press(&mut app, "y");
+        assert_eq!(crate::books::load_password("me@example.com").as_deref(), Some("hunter2secret"));
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(root.join("digi4school-password")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "only you can read the saved password");
+        assert!(!std::fs::read_to_string(crate::config::config_path()).unwrap().contains("hunter2"));
+        app.chats.password = None;
+        press(&mut app, "L");
+        assert_eq!(app.mode, Mode::Normal, "a saved password isn't asked for again");
+        assert_eq!(app.chats.password.as_deref(), Some("hunter2secret"));
+        // A saved password the site rejects is removed, so it can't keep failing.
+        app.on_book_event(serde_json::json!({"event": "error", "message": "Login failed: invalid"}));
+        assert_eq!(crate::books::load_password("me@example.com"), None);
+        assert!(app.chats.password.is_none());
+        // The Settings action forgets it too.
+        crate::books::save_password("me@example.com", "again").unwrap();
+        app.forget_books_password();
+        assert_eq!(crate::books::load_password("me@example.com"), None);
+        app.chats.listing = false;
         app.chats.password = Some("pw".into());
         app.chats.book_sel = 0;
         press(&mut app, "\n");

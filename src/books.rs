@@ -1,6 +1,8 @@
 //! digi4school books, through the digi_download_core library. Downloads run in a separate helper
 //! process, because the library panics on unexpected responses and that mustn't take the app down.
-//! Your password is passed over stdin and never written to disk. Books stay on this computer.
+//! The password reaches the helper over stdin, never as a command argument. It's only saved if you
+//! choose that: in your desktop keyring when there is one, otherwise in a file only you can read.
+//! Books stay on this computer.
 
 use crate::config::{data_dir, find_bin};
 use anyhow::{anyhow, bail, Context, Result};
@@ -21,6 +23,79 @@ pub struct RemoteBook {
 struct Login {
     email: String,
     password: String,
+}
+
+const KEYRING_SERVICE: &str = "lockin-digi4school";
+
+fn password_file() -> PathBuf {
+    match std::env::var_os("LOCKIN_HOME") {
+        Some(p) => PathBuf::from(p).join("digi4school-password"),
+        None => crate::config::home().join(".config/lockin/digi4school-password"),
+    }
+}
+
+/// The keyring is skipped in a sandbox, so tests can't touch the real one.
+fn keyring_available() -> bool {
+    !crate::config::is_sandboxed() && find_bin("secret-tool").is_file()
+}
+
+pub fn load_password(email: &str) -> Option<String> {
+    if keyring_available() {
+        let out = Command::new(find_bin("secret-tool")).args(["lookup", "service", KEYRING_SERVICE, "account", email]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok();
+        if let Some(out) = out.filter(|o| o.status.success() && !o.stdout.is_empty()) {
+            return String::from_utf8(out.stdout).ok();
+        }
+    }
+    std::fs::read_to_string(password_file()).ok().filter(|p| !p.is_empty())
+}
+
+/// Saves the password, and returns where it went so you can be told.
+pub fn save_password(email: &str, password: &str) -> Result<String> {
+    if keyring_available() {
+        let child = Command::new(find_bin("secret-tool"))
+            .args(["store", "--label=LockIn digi4school password", "service", KEYRING_SERVICE, "account", email])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Ok(mut child) = child {
+            let wrote = child.stdin.take().is_some_and(|mut s| s.write_all(password.as_bytes()).is_ok());
+            if wrote && child.wait().is_ok_and(|st| st.success()) {
+                std::fs::remove_file(password_file()).ok();
+                return Ok("your desktop keyring".to_string());
+            }
+        }
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = password_file();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::remove_file(&path).ok();
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+    file.write_all(password.as_bytes())?;
+    Ok(format!("{}, unencrypted but readable only by you", path.display()))
+}
+
+pub fn forget_password(email: &str) {
+    if keyring_available() {
+        let _ = Command::new(find_bin("secret-tool")).args(["clear", "service", KEYRING_SERVICE, "account", email]).stdin(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    std::fs::remove_file(password_file()).ok();
+}
+
+/// `lockin books-debug`: reports the site's structure, with no personal data, using the saved login.
+pub fn debug(email: &str) -> Result<()> {
+    if email.is_empty() {
+        bail!("Log in once from the Books screen first");
+    }
+    let password = load_password(email).context("No saved password. Log in from the Books screen and choose to save it")?;
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let session = Session::new(email.to_string(), password).await.map_err(|e| anyhow!("Login failed: {e}"))?;
+        print!("{}", session.debug_report().await);
+        Ok(())
+    })
 }
 
 pub fn books_dir() -> PathBuf {
