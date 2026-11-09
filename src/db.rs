@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 
-const SCHEMA: &str = "
+pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS tasks(
   id INTEGER PRIMARY KEY, title TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', due INTEGER,
   priority INTEGER NOT NULL DEFAULT 0, priority_locked INTEGER NOT NULL DEFAULT 0,
@@ -28,6 +28,13 @@ CREATE TABLE IF NOT EXISTS focus(
 CREATE TABLE IF NOT EXISTS briefings(id INTEGER PRIMARY KEY, created_at INTEGER NOT NULL, headline TEXT NOT NULL, plan TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS inbox(subject TEXT NOT NULL, message TEXT NOT NULL, time INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tutor_sessions(
+  id INTEGER PRIMARY KEY, source TEXT NOT NULL UNIQUE, course TEXT NOT NULL, title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '', docs TEXT NOT NULL DEFAULT '[]', claude_session TEXT,
+  sent_pages TEXT NOT NULL DEFAULT '[]', notes_digest TEXT NOT NULL DEFAULT '', cmid INTEGER,
+  pulled INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS tutor_messages(
+  id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, role INTEGER NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
 ";
 
 #[derive(Clone, Debug, Default, Serialize)]

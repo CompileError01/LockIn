@@ -17,6 +17,8 @@ pub enum Key {
     NtfyServer,
     NtfyTopic,
     Model,
+    TutorModel,
+    TutorLanguage,
     AboutMe,
     FocusMinutes,
     BreakMinutes,
@@ -51,6 +53,8 @@ pub const ROWS: &[(&str, Key)] = &[
     ("Notifications", Key::NtfyServer),
     ("Notifications", Key::NtfyTopic),
     ("Claude", Key::Model),
+    ("Claude", Key::TutorModel),
+    ("Claude", Key::TutorLanguage),
     ("Claude", Key::AboutMe),
     ("Focus timer", Key::FocusMinutes),
     ("Focus timer", Key::BreakMinutes),
@@ -66,12 +70,13 @@ pub const ROWS: &[(&str, Key)] = &[
 
 const SYNC_STEPS: [i64; 7] = [0, 15, 30, 60, 120, 240, 480];
 const MODELS: [&str; 3] = ["haiku", "sonnet", "opus"];
+const LANGUAGES: [&str; 3] = ["auto", "English", "Deutsch"];
 
 pub fn kind(key: Key) -> Kind {
     use Key::*;
     match key {
         DailyEnabled | DailyCatchUp | DailyClaude | SyncOnOpen | Desktop | Phone | Icons => Kind::Toggle,
-        DailyDays | SyncInterval | Model | FocusMinutes | BreakMinutes => Kind::Choice,
+        DailyDays | SyncInterval | Model | TutorModel | TutorLanguage | FocusMinutes | BreakMinutes => Kind::Choice,
         DailyTimes | NtfyServer | NtfyTopic | AboutMe | Vault | NewNoteDir | Editor => Kind::Text,
         RunDaily | SyncNow | TestNotify | EditFile => Kind::Action,
     }
@@ -95,6 +100,8 @@ pub fn label(key: Key) -> &'static str {
         Key::NtfyServer => "ntfy server",
         Key::NtfyTopic => "ntfy topic",
         Key::Model => "Model",
+        Key::TutorModel => "Tutor model",
+        Key::TutorLanguage => "Tutor language",
         Key::AboutMe => "About you",
         Key::FocusMinutes => "Focus length",
         Key::BreakMinutes => "Break length",
@@ -128,6 +135,8 @@ pub fn value(cfg: &Config, key: Key) -> String {
         Key::NtfyServer => cfg.ntfy_server.clone(),
         Key::NtfyTopic => cfg.ntfy_topic.clone(),
         Key::Model => cfg.model.clone(),
+        Key::TutorModel => cfg.tutor_model.clone(),
+        Key::TutorLanguage => cfg.tutor_language.clone(),
         Key::AboutMe => cfg.about_me.clone(),
         Key::FocusMinutes => format!("{} min", cfg.focus_minutes),
         Key::BreakMinutes => format!("{} min", cfg.break_minutes),
@@ -153,6 +162,8 @@ pub fn help(key: Key) -> &'static str {
         Key::NtfyServer => "The server that delivers phone notifications. Change it only if you host your own.",
         Key::NtfyTopic => "Subscribe to this name in the ntfy app. Anyone who knows it can read your notifications, so keep it private.",
         Key::Model => "The Claude model for the briefing and the Claude tab. Haiku uses the least of your usage, and Opus uses the most.",
+        Key::TutorModel => "The Claude model for the Tutor tab. Opus handles harder math better, and uses more of your usage.",
+        Key::TutorLanguage => "auto replies in the language you write in, and starts lessons in the material's language. Or always use English or Deutsch.",
         Key::AboutMe => "A short line Claude reads when planning, like your school and year. Leave it empty if you prefer.",
         Key::FocusMinutes => "Default length of a focus session.",
         Key::BreakMinutes => "Default length of a break.",
@@ -185,6 +196,14 @@ pub fn step(cfg: &mut Config, key: Key, dir: i64) {
         Key::Model => {
             let i = MODELS.iter().position(|m| *m == cfg.model).unwrap_or(1) as i64;
             cfg.model = MODELS[(i + dir).rem_euclid(MODELS.len() as i64) as usize].into();
+        }
+        Key::TutorLanguage => {
+            let i = LANGUAGES.iter().position(|l| *l == cfg.tutor_language).unwrap_or(0) as i64;
+            cfg.tutor_language = LANGUAGES[(i + dir).rem_euclid(LANGUAGES.len() as i64) as usize].into();
+        }
+        Key::TutorModel => {
+            let i = MODELS.iter().position(|m| *m == cfg.tutor_model).unwrap_or(1) as i64;
+            cfg.tutor_model = MODELS[(i + dir).rem_euclid(MODELS.len() as i64) as usize].into();
         }
         Key::FocusMinutes => cfg.focus_minutes = (cfg.focus_minutes + 5 * dir).clamp(5, 180),
         Key::BreakMinutes => cfg.break_minutes = (cfg.break_minutes + dir).clamp(1, 60),

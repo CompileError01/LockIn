@@ -30,6 +30,7 @@ lockin brief      ask Claude for a new plan and print it
 lockin today      print open tasks
 lockin add "Read chapter 4 @fri 18:00 !! #AM ~45m"
 lockin pdf FILE   read a PDF in the terminal
+lockin teach FILE "question"   ask the tutor about a file
 lockin notify     send a test notification
 lockin status     show paths, phone topic and last run times
 lockin install    apply your settings to the daily systemd timer
@@ -52,7 +53,8 @@ If Moodle or Claude fails, you still get a notification from the latest data, wi
 
 Claude runs with all tools turned off, so it can only return text. Assignment text written by other
 people can't make it submit, delete or run anything. It sees your tasks, calendar, habits, focus time
-and unread Moodle notifications. **It never sees your vault notes.**
+and unread Moodle notifications. **It never sees your vault notes**, unless you open a file from the
+Notes tab in the tutor, and then it sees only that file.
 
 Priorities you set yourself with `+` or `-` are locked, and Claude won't change them.
 
@@ -87,6 +89,22 @@ export MOODLE_OPENER="lockin open"
 ```
 
 Needs `poppler`.
+
+## Tutor
+
+The Tutor tab teaches you from your own course material. Pick a course and press `s` to download its
+files from Moodle, then press Enter on an exercise or a PDF. You can also press `L` on a Moodle task,
+or on a file in the Notes tab.
+
+Claude sees the actual pages as images, so it can read formulas and scans, and asks for further pages
+when it needs them. It uses your teacher's methods, works step by step, and on graded assignments it
+guides you instead of writing answers you could hand in.
+
+It keeps its own notes per subject in `~/.local/share/lockin/tutor-notes`, one Markdown file per method,
+and reads them in later lessons. Press `n` to read, edit or delete them. Lessons are saved, so you can
+come back to them. Each lesson uses your Claude usage, and you can choose the model in Settings.
+
+Claude has no tools here either. It only sees the material you open, plus its own notes.
 
 ## Phone notifications
 

@@ -117,7 +117,14 @@ def collect(path):
                 "time": n.get("timecreated") or 0,
             })
 
-    return {"window_from": window_from, "tasks": tasks, "events": events, "grades": grades, "inbox": inbox}
+    course_list = [{
+        "shortname": c.get("shortname", ""),
+        "fullname": text(c.get("fullname")),
+        "current": group(c) == 0,
+        "folder": str(sh.dl_dir() / m.safe_name(c.get("shortname"))),
+    } for c in courses]
+
+    return {"courses": course_list, "window_from": window_from, "tasks": tasks, "events": events, "grades": grades, "inbox": inbox}
 
 
 def main():

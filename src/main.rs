@@ -7,6 +7,7 @@ mod pdf;
 mod services;
 mod settings;
 mod timeutil;
+mod tutor;
 mod ui;
 
 use anyhow::{Context, Result};
@@ -37,6 +38,8 @@ enum Cmd {
     Pdf { file: std::path::PathBuf },
     /// Open a file: PDFs in the terminal, anything else in your usual app
     Open { file: std::path::PathBuf },
+    /// Ask the tutor about one file, from the shell
+    Teach { file: std::path::PathBuf, question: Vec<String> },
     /// Send a test notification to the desktop and phone
     Notify,
     /// Install or update the daily systemd timer from your settings
@@ -90,6 +93,25 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Pdf { file }) => pdf::view(&file),
         Some(Cmd::Open { file }) => pdf::open_any(&file),
+        Some(Cmd::Teach { file, question }) => {
+            let db = open_db()?;
+            let path = file.canonicalize().with_context(|| format!("Can't open {}", file.display()))?;
+            let rel = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let material = tutor::Material::File { path, rel };
+            let id = match tutor::find_session(&db, &material.source_key())? {
+                Some(s) => s.id,
+                None => tutor::create_session(&db, "", &material)?,
+            };
+            let question = if question.is_empty() { tutor::OPENER.to_string() } else { question.join(" ") };
+            tutor::add_message(&db, id, tutor::Role::You, &question)?;
+            tutor::teach(&db, &cfg, id, &question)?;
+            let all = tutor::messages(&db, id)?;
+            let from = all.iter().rposition(|(role, _)| *role == tutor::Role::You).map_or(0, |i| i + 1);
+            for (_, text) in &all[from..] {
+                println!("{text}\n");
+            }
+            Ok(())
+        }
         Some(Cmd::Notify) => {
             let errors = services::notify_all(&cfg, "LockIn test", "Notifications are working.", false, false);
             for e in &errors {

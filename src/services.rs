@@ -87,6 +87,9 @@ pub fn run_daily_now() -> Result<()> {
 
 pub fn sync(db: &mut Db) -> Result<SyncSummary> {
     let moodle = find_bin("moodle");
+    if !moodle.is_file() {
+        bail!("The moodle command isn't installed, so LockIn can't sync. Put it in ~/.local/bin/moodle");
+    }
     let out = Command::new(find_bin("timeout"))
         .arg("120")
         .arg(find_bin("python3"))
@@ -101,6 +104,9 @@ pub fn sync(db: &mut Db) -> Result<SyncSummary> {
     })?;
     if reply["ok"] != json!(true) {
         bail!("Moodle: {}", reply["error"].as_str().unwrap_or("unknown error"));
+    }
+    if reply["courses"].is_array() {
+        db.set_meta("courses", &reply["courses"].to_string())?;
     }
     let snapshot: Snapshot = serde_json::from_value(reply).context("unexpected data from Moodle")?;
     db.apply_snapshot(&snapshot)

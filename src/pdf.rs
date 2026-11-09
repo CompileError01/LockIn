@@ -82,12 +82,16 @@ fn render_page(path: &Path, page: usize, w: u32, h: u32) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-fn all_text(path: &Path) -> Vec<String> {
+pub fn all_text(path: &Path) -> Vec<String> {
     let out = poppler("pdftotext").args(["-layout"]).arg(path).arg("-").stdin(Stdio::null()).stderr(Stdio::null()).output();
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).split('\u{c}').map(str::to_string).collect(),
         _ => vec![],
     }
+}
+
+pub fn page_count(path: &Path) -> Result<usize> {
+    Ok(page_sizes(path)?.len())
 }
 
 /// Page count and first-page text, for the preview column in the Notes tab.

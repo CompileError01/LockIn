@@ -14,6 +14,10 @@ pub struct Config {
     pub nerd_icons: bool,
     /// Model alias passed to `claude --model`.
     pub model: String,
+    /// Model alias for the Tutor tab.
+    pub tutor_model: String,
+    /// `auto` follows the language you write in, or name one like `English`.
+    pub tutor_language: String,
     /// A line about you that Claude reads when planning, like your school and year.
     pub about_me: String,
     pub desktop_notifications: bool,
@@ -45,6 +49,8 @@ impl Default for Config {
             editor: std::env::var("EDITOR").ok().filter(|e| !e.is_empty()).unwrap_or_else(|| "nvim".into()),
             nerd_icons: true,
             model: "sonnet".into(),
+            tutor_model: "sonnet".into(),
+            tutor_language: "auto".into(),
             about_me: String::new(),
             desktop_notifications: true,
             // Off until you choose it, because task titles get sent to a public server.

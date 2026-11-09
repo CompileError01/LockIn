@@ -3,6 +3,7 @@ use crate::db::{Grade, Task};
 use crate::files::{human_size, Entry, Preview, Sort};
 use crate::form::Target;
 use crate::settings::{self, Kind};
+use crate::tutor::{self, Material, Role};
 use crate::timeutil::{date_of, fmt_abs, fmt_rel, local, now_ts, today};
 use chrono::{Datelike, Duration, Local};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -82,6 +83,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::Grades => draw_grades(f, app, body),
         View::Focus => draw_focus(f, app, body),
         View::Claude => draw_claude(f, app, body),
+        View::Tutor => draw_tutor(f, app, body),
         View::Settings => draw_settings(f, app, body),
     }
     draw_status(f, app, status);
@@ -145,7 +147,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if app.syncing {
         right.push(Span::styled(format!("{spin} sync  "), st(BLUE)));
     }
-    if app.briefing_busy || app.chat_busy {
+    if app.tutor_pulling {
+        right.push(Span::styled(format!("{spin} downloading  "), st(BLUE)));
+    }
+    if app.briefing_busy || app.chat_busy || app.tutor_busy {
         right.push(Span::styled(format!("{spin} claude  "), st(ORANGE)));
     }
     let now = now_ts();
@@ -183,6 +188,7 @@ fn prompt_label(p: &Prompt) -> &'static str {
         Prompt::Setting(_) => "value: ",
         Prompt::NewHabit => "new habit: ",
         Prompt::Chat => "ask claude: ",
+        Prompt::TutorAsk => "ask your tutor: ",
     }
 }
 
@@ -201,6 +207,8 @@ fn draw_cmdline(f: &mut Frame, app: &App, area: Rect) {
             let q = match c {
                 Confirm::TrashNote(p) => format!("Move {} to the vault's .trash? (y/n)", p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
                 Confirm::DeleteHabit(_, n) => format!("Delete habit {n} and its history? (y/n)"),
+                Confirm::DeleteTutorNote(p) => format!("Delete the note {}? (y/n)", p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+                Confirm::RestartLesson(_) => "Start this lesson over and erase its conversation? Claude's notes stay. (y/n)".to_string(),
                 Confirm::DeleteAgenda(title) => format!("Delete {title}? (y or d to confirm, u undoes it later)"),
                 Confirm::Quit => "A focus session is running and will be lost. Quit? (y/n)".to_string(),
             };
@@ -886,7 +894,12 @@ fn draw_file_preview(f: &mut Frame, area: Rect, app: &App, target: Option<&Entry
         return;
     }
     let inner = Rect { x: area.x + 1, width: area.width.saturating_sub(2), ..area };
-    match &app.preview {
+    draw_preview_content(f, inner, &app.preview, target, app);
+}
+
+fn draw_preview_content(f: &mut Frame, inner: Rect, preview: &Preview, target: Option<&Entry>, app: &App) {
+    let area = inner;
+    match preview {
         Preview::None => {}
         Preview::Dir(children) => {
             let refs: Vec<&Entry> = children.iter().collect();
@@ -1229,6 +1242,191 @@ fn draw_claude(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(para.scroll((scroll, 0)).block(block), area);
 }
 
+fn draw_tutor(f: &mut Frame, app: &App, area: Rect) {
+    match app.tutor_level {
+        TutorLevel::Courses => draw_tutor_courses(f, app, area),
+        TutorLevel::Materials => draw_tutor_materials(f, app, area),
+        TutorLevel::Lesson => draw_tutor_lesson(f, app, area),
+        TutorLevel::Notes => draw_tutor_notes(f, app, area),
+    }
+}
+
+fn draw_tutor_courses(f: &mut Frame, app: &App, area: Rect) {
+    let (list, side) = with_preview(area);
+    if app.tutor_courses.is_empty() {
+        empty(f, list, "No courses yet. Press gs to sync Moodle, then come back here.");
+    } else {
+        let width = (list.width as usize).saturating_sub(5);
+        let rows = app
+            .tutor_courses
+            .iter()
+            .map(|c| {
+                let open = app.tasks.iter().filter(|t| !t.done && t.course == c.shortname).count();
+                let tag = if open > 0 { format!("{open} open") } else { String::new() };
+                Row::Item(Line::from(vec![Span::styled(pad(&c.fullname, width.saturating_sub(9)), st(FG)), Span::styled(format!("{tag:>8}"), st(YELLOW))]))
+            })
+            .collect();
+        draw_buffer(f, list, rows, app.tutor_course, true);
+    }
+    let Some(side) = side else { return };
+    let lines = vec![
+        Line::from(Span::styled("✻ Your tutor", st(ORANGE).add_modifier(Modifier::BOLD))),
+        Line::default(),
+        Line::from(Span::styled("Pick a course, then an exercise or a PDF. Claude reads the pages, teaches you step by step, and saves its own notes on the methods your teacher uses.", st(MUTED))),
+        Line::default(),
+        Line::from(vec![Span::styled("Enter  ", st(ORANGE)), Span::styled("open a course", st(DIM))]),
+        Line::from(vec![Span::styled("s      ", st(ORANGE)), Span::styled("download its files from Moodle", st(DIM))]),
+        Line::default(),
+        Line::from(Span::styled("Claude only sees what you open here. It has no tools, so it can't read your other files or change anything.", st(DIM))),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(panel(" Tutor ")), side);
+}
+
+fn draw_tutor_materials(f: &mut Frame, app: &App, area: Rect) {
+    let (list, side) = with_preview(area);
+    let course = app.tutor_courses.get(app.tutor_course).map_or("", |c| c.fullname.as_str());
+    let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(list);
+    f.render_widget(Paragraph::new(Line::from(vec![Span::raw(" "), Span::styled(course.to_string(), st(BLUE).add_modifier(Modifier::BOLD)), Span::styled(format!("   {} notes", app.tutor_notes.len()), st(DIM))])), head);
+    if app.tutor_materials.is_empty() {
+        empty(f, body, "No exercises or files yet. Press s to download this course's files.");
+    } else {
+        let width = (body.width as usize).saturating_sub(4 + 11);
+        let mut rows = Vec::new();
+        let mut last = "";
+        for m in &app.tutor_materials {
+            let (section, right, color) = match m {
+                Material::Task { due, .. } => ("Open on Moodle", due.map_or(String::new(), fmt_rel), YELLOW),
+                Material::File { .. } => ("Files", String::new(), DIM),
+            };
+            if section != last {
+                rows.push(section_header(section));
+                last = section;
+            }
+            let started = tutor::find_session(&app.db, &m.source_key()).ok().flatten().is_some();
+            rows.push(Row::Item(Line::from(vec![
+                Span::styled(if started { "✻ " } else { "  " }, st(ORANGE)),
+                Span::styled(pad(m.title(), width.saturating_sub(2)), st(FG)),
+                Span::styled(format!(" {right:>9}"), st(color)),
+            ])));
+        }
+        draw_buffer(f, body, rows, app.tutor_material, true);
+    }
+    let Some(side) = side else { return };
+    let block = panel(" Preview ");
+    let inner = block.inner(side);
+    f.render_widget(block, side);
+    match app.tutor_materials.get(app.tutor_material) {
+        Some(Material::Task { title, description, due, .. }) => {
+            let mut lines = vec![Line::from(Span::styled(title.clone(), st(FG).add_modifier(Modifier::BOLD)))];
+            if let Some(d) = due {
+                lines.push(Line::from(Span::styled(format!("due {} ({})", fmt_abs(*d), fmt_rel(*d)), st(due_color(*d, now_ts())))));
+            }
+            lines.push(Line::default());
+            if description.trim().is_empty() {
+                lines.push(Line::from(Span::styled("No description. Attachments are downloaded when you start.", st(DIM))));
+            } else {
+                lines.extend(md_lines(description));
+            }
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        }
+        Some(Material::File { .. }) => draw_preview_content(f, inner, &app.tutor_preview, None, app),
+        None => {}
+    }
+    let keys = "Enter learn  v view  N restart  n notes  s download  h back";
+    if inner.height > 1 {
+        f.render_widget(Paragraph::new(Span::styled(fit(keys, inner.width as usize), st(DIM))).style(Style::default().bg(BG)), Rect { y: inner.y + inner.height - 1, height: 1, ..inner });
+    }
+}
+
+fn draw_tutor_lesson(f: &mut Frame, app: &App, area: Rect) {
+    let (chat_area, side) = if area.width >= 100 {
+        let [a, b] = Layout::horizontal([Constraint::Min(60), Constraint::Length(34)]).areas(area);
+        (a, Some(b))
+    } else {
+        (area, None)
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    for (role, text) in &app.tutor_chat {
+        match role {
+            Role::You => {
+                lines.push(Line::from(Span::styled("› You", st(BLUE).add_modifier(Modifier::BOLD))));
+                lines.extend(text.lines().map(|l| Line::from(Span::styled(l.to_string(), st(FG)))));
+                lines.push(Line::default());
+            }
+            Role::Tutor => {
+                lines.push(Line::from(Span::styled("✻ Tutor", st(ORANGE).add_modifier(Modifier::BOLD))));
+                lines.extend(md_lines(text));
+                lines.push(Line::default());
+            }
+            Role::Saved => {
+                lines.push(Line::from(Span::styled(format!("  ✎ {text}"), st(GREEN))));
+                lines.push(Line::default());
+            }
+        }
+    }
+    if app.tutor_busy {
+        const SPIN: [&str; 4] = ["✢", "✳", "✶", "✻"];
+        lines.push(Line::from(Span::styled(format!("{} reading and thinking…", SPIN[app.spinner / 2 % 4]), st(ORANGE))));
+    } else if app.tutor_chat.is_empty() {
+        lines.push(Line::from(Span::styled("Press i to ask your tutor something.", st(MUTED))));
+    }
+    let block = panel(format!(" ✻ {} ", fit(&app.tutor_title, (chat_area.width as usize).saturating_sub(8))));
+    let inner = block.inner(chat_area);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let total = para.line_count(inner.width) as u16;
+    let max = total.saturating_sub(inner.height);
+    let scroll = max.saturating_sub(app.tutor_scroll.min(max));
+    f.render_widget(para.scroll((scroll, 0)).block(block), chat_area);
+
+    let Some(side) = side else { return };
+    let mut info: Vec<Line> = Vec::new();
+    info.push(Line::from(Span::styled("Reading", st(ORANGE).add_modifier(Modifier::BOLD))));
+    if app.tutor_docs.is_empty() {
+        info.push(Line::from(Span::styled("the task description", st(DIM))));
+    }
+    for d in &app.tutor_docs {
+        let name = d.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        info.push(Line::from(Span::styled(fit(&name, side.width.saturating_sub(2) as usize), st(MUTED))));
+    }
+    info.push(Line::default());
+    info.push(Line::from(Span::styled(format!("Claude's notes ({})", app.tutor_notes.len()), st(ORANGE).add_modifier(Modifier::BOLD))));
+    if app.tutor_notes.is_empty() {
+        info.push(Line::from(Span::styled("None yet for this subject.", st(DIM))));
+    }
+    for n in app.tutor_notes.iter().take(side.height.saturating_sub(14) as usize) {
+        info.push(Line::from(vec![Span::styled("✎ ", st(GREEN)), Span::styled(fit(&n.title, side.width.saturating_sub(4) as usize), st(MUTED))]));
+    }
+    info.push(Line::default());
+    for (k, d) in [("i", "ask"), ("j k", "scroll"), ("v", "view the PDF"), ("n", "read the notes"), ("h", "back")] {
+        info.push(Line::from(vec![Span::styled(format!("{k:<5}"), st(ORANGE)), Span::styled(d, st(DIM))]));
+    }
+    f.render_widget(Paragraph::new(info).block(panel(" Lesson ")), side);
+}
+
+fn draw_tutor_notes(f: &mut Frame, app: &App, area: Rect) {
+    let (list, side) = with_preview(area);
+    if app.tutor_notes.is_empty() {
+        empty(f, list, "Claude hasn't saved any notes for this subject yet. They appear here as you learn.");
+    } else {
+        let width = (list.width as usize).saturating_sub(5);
+        let rows = app.tutor_notes.iter().map(|n| Row::Item(Line::from(Span::styled(fit(&n.title, width), st(FG))))).collect();
+        draw_buffer(f, list, rows, app.tutor_note, true);
+    }
+    let Some(side) = side else { return };
+    let title = format!(" Claude's notes: {} ", app.tutor_subject);
+    let lines = match app.tutor_notes.get(app.tutor_note) {
+        Some(n) => {
+            let mut l = vec![Line::from(Span::styled(n.title.clone(), st(ORANGE).add_modifier(Modifier::BOLD))), Line::from(Span::styled(format!("updated {}", fmt_rel(n.modified)), st(DIM))), Line::default()];
+            l.extend(md_lines(&n.body));
+            l.push(Line::default());
+            l.push(Line::from(Span::styled("Enter edit  d delete  u undo  h back", st(DIM))));
+            l
+        }
+        None => vec![],
+    };
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((app.preview_scroll, 0)).block(panel(title)), side);
+}
+
 // ---- popups ---------------------------------------------------------------
 
 const LEADER_KEYS: &[(&str, &str)] = &[
@@ -1242,6 +1440,7 @@ const LEADER_KEYS: &[(&str, &str)] = &[
     ("g", "grades"),
     ("p", "focus timer"),
     ("a", "ask claude"),
+    ("l", "learn with your tutor"),
     ("m", "open moodle cli"),
     (",", "settings"),
     ("s", "sync moodle"),
@@ -1277,7 +1476,7 @@ J K  scroll the details pane    Tab, gt, gT  change tab   3gt  go to tab 3
 # Tasks (Today and Tasks tabs)
 o  new task   e  edit title   D  set due date   x  done, or reopen
 + -  priority   dd  delete    u  undo           f  filter all, Moodle, mine
-zd  show finished   gx  open in browser   gf  focus on this task
+zd  show finished   gx  open in browser   gf  focus on this task   L  learn it
 Enter on a Moodle task opens it in the Moodle CLI, where u uploads files.
 Enter on your own task edits its notes.
 
@@ -1316,6 +1515,14 @@ gf on a task starts a session tied to that task.
 
 # Claude
 i  ask   j k  scroll   c  clear the chat
+
+# Tutor
+Enter or l  open   h or Esc  back   s  download the course's files
+On an exercise or file: Enter learn   v view   N start over   n Claude's notes
+In a lesson: i ask   j k scroll   v view the PDF   n read the notes
+In Claude's notes: Enter edit   d delete   u undo
+L on a Moodle task, or on a file in Notes, starts a lesson on it.
+Only what you open goes to Claude.
 
 # Settings
 j k  move   Enter or x  change   h l  step a value
@@ -1599,6 +1806,70 @@ mod tests {
                 }
             }
         }
+
+        // Tutor: browse a course's materials, open a lesson, read Claude's notes.
+        let moodle_dir = root.join("moodle/AM");
+        std::fs::create_dir_all(&moodle_dir).unwrap();
+        std::fs::write(moodle_dir.join("Blatt.txt"), "Vereinfachen Sie").unwrap();
+        let courses = serde_json::json!([
+            {"shortname": "AM", "fullname": "Mathematik", "current": true, "folder": moodle_dir},
+            {"shortname": "OLD", "fullname": "Old course", "current": false, "folder": "/nonexistent"},
+        ]);
+        app.db.set_meta("courses", &courses.to_string()).unwrap();
+        tutor::save_note("am", "Potenzgesetze", "(a^m)^n = a^(m·n)").unwrap();
+        press(&mut app, ":tutor\n");
+        assert_eq!(app.tutor_courses.len(), 1, "past courses are hidden");
+        assert!(screen(&mut app, 120, 30).contains("Mathematik"));
+        press(&mut app, "\n");
+        assert_eq!(app.tutor_level, TutorLevel::Materials);
+        assert_eq!(app.tutor_materials.len(), 2, "the open Moodle task, then the file");
+        assert!(matches!(app.tutor_materials[0], Material::Task { .. }));
+        assert!(screen(&mut app, 120, 30).contains("Blatt.txt"));
+        press(&mut app, "\n");
+        assert_eq!(app.tutor_level, TutorLevel::Lesson);
+        assert!(app.tutor_busy, "a new lesson starts by itself");
+        assert!(screen(&mut app, 120, 30).contains("Potenzgesetze"), "Claude's notes show in the lesson");
+        app.tutor_busy = false;
+        press(&mut app, "iWas ist ein Bruch?\n");
+        assert_eq!(app.tutor_chat.last().unwrap().1, "Was ist ein Bruch?");
+        assert!(app.tutor_busy);
+        press(&mut app, "ialso this\n");
+        assert_eq!(app.msg_kind, MsgKind::Error, "one question at a time");
+        app.tutor_busy = false;
+        press(&mut app, "n");
+        assert_eq!(app.tutor_level, TutorLevel::Notes);
+        assert!(screen(&mut app, 120, 30).contains("a^(m·n)"));
+        press(&mut app, "dn");
+        assert_eq!(app.tutor_notes.len(), 1, "n cancels");
+        press(&mut app, "dy");
+        assert!(app.tutor_notes.is_empty());
+        press(&mut app, "u");
+        assert_eq!(app.tutor_notes.len(), 1, "u restores a deleted note");
+        press(&mut app, "\n");
+        assert!(matches!(app.want_editor.take(), Some(EditTarget::Note(_))));
+        for (level, session) in [(TutorLevel::Courses, None), (TutorLevel::Materials, None), (TutorLevel::Lesson, app.tutor_session), (TutorLevel::Notes, app.tutor_session)] {
+            app.tutor_level = level;
+            app.tutor_session = session;
+            for (w, h) in [(160, 45), (120, 30), (80, 24), (60, 16), (30, 8), (10, 4)] {
+                screen(&mut app, w, h);
+            }
+        }
+        // Reopening keeps the conversation, and start-over asks before erasing it.
+        app.tutor_level = TutorLevel::Materials;
+        app.tutor_session = None;
+        app.tutor_material = 0;
+        press(&mut app, "\n");
+        assert_eq!(app.tutor_chat.len(), 1, "reopening continues the lesson");
+        assert!(!app.tutor_busy, "and doesn't start a new request");
+        press(&mut app, "h");
+        press(&mut app, "Nn");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(tutor::find_session(&app.db, &app.tutor_materials[0].source_key()).unwrap().is_some());
+        press(&mut app, "Ny");
+        assert!(app.tutor_chat.is_empty(), "start-over erases only after you confirm");
+        app.tutor_busy = false;
+        press(&mut app, "hh");
+        assert_eq!(app.tutor_level, TutorLevel::Courses);
 
         // Quitting during a focus session asks first.
         press(&mut app, ":q\n");
