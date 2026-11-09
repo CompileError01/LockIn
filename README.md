@@ -28,6 +28,7 @@ lockin daily      sync Moodle, ask Claude, send notifications (what the timer ru
 lockin sync       pull deadlines and events from Moodle, and your timetable and tests from Untis
 lockin brief      ask Claude for a new plan and print it
 lockin plan       plan study sessions for your upcoming tests
+lockin draft 5    draft Moodle assignment 5 for you to check in Tasks → Drafts
 lockin remind --preview   show which reminders would be sent right now
 lockin today      print open tasks
 lockin add "Read chapter 4 @fri 18:00 !! #AM ~45m"
@@ -127,6 +128,30 @@ calendar too. Sessions you edit or move are yours, and planning again keeps them
 The daily job plans each new test once, so a session you delete stays deleted. The hours, the session
 length and the daily limit are in the Settings tab.
 
+## Assignment drafts
+
+Press `W` on a Moodle assignment in the Tasks tab, or text LockIn "do RA 4" (or `do 5` with the task number).
+Claude reads the assignment, its attached files, Claude's notes on your teacher's methods and, if it needs
+them, up to three of the course's files, like a worksheet the assignment names. It then writes a draft in the
+form Moodle takes: online text, or files. If only a PDF is allowed, it writes the PDF, which LibreOffice
+makes. Drafting takes a minute or a few, and you get a notification when it's done. On the phone, that
+notification holds the draft's text, and the PDF comes as an attachment.
+
+Drafts wait in **Tasks → Drafts** (press `]`). There you see what Claude was unsure of, and:
+
+- `Enter` edits the draft. For a PDF you edit the HTML it's made from, and the PDF is remade when you close it.
+- `o` opens the PDF, `r` asks Claude for changes, `dd` discards it.
+- `S` submits it to Moodle for grading. It asks first, saying which files it replaces and which statement,
+  like "this is my own work", you accept. A final submission usually can't be changed afterwards.
+
+From the phone you can read a draft, ask for changes with `redo 3 make it shorter`, and list drafts with
+`drafts`. **Only the app on this computer can submit.** That way someone who learns your topic name can't
+hand in work for you. `src/assignment.py` is the only code that changes anything on Moodle, and it runs
+only after you confirm `S`.
+
+Handing in work Claude wrote may break your school's rules, so check them. Claude's notes say where it
+wasn't sure, and you're responsible for what you submit.
+
 ## Chats
 
 The Chats tab holds your conversations with Claude. Each chat has its own files, which can be any PDFs or
@@ -197,6 +222,9 @@ event Shopping @tom 17:00               adds to your calendar and week, with no 
 list                                    open tasks, with their numbers
 done 12                                 ticks off task 12
 sync                                    updates from Moodle
+do 5                                    drafts assignment 5 for you to check
+redo 3 make it shorter                  rewrites draft 3
+drafts                                  your drafts
 help                                    this list
 ```
 
@@ -204,8 +232,8 @@ A background service does this, so the app can be closed, but your computer has 
 be logged in. Messages sent while it's off are picked up later, for about 12 hours.
 
 **The topic name works like a password.** Anyone who has it can read your replies and send commands, so
-keep it private. To limit the damage if it leaks, LockIn can only add tasks and events, tick off tasks and
-sync from here. It can't delete anything, submit to Moodle, read your files or run commands, and it answers
+keep it private. To limit the damage if it leaks, LockIn can only add tasks and events, tick off tasks,
+sync and write drafts from here. It can't delete anything, submit to Moodle, read your files or run commands, and it answers
 at most 20 messages an hour. Messages and replies pass through the ntfy server. If you think the name has
 leaked, change the topic in Settings. Turn the feature off with `lockin replies off`.
 

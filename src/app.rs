@@ -53,6 +53,7 @@ pub enum Prompt {
     NewHabit,
     ChatTitle(Option<i64>),
     ChatAsk,
+    DraftFeedback(i64),
     BooksEmail,
     BooksPassword,
     Setting(settings::Key),
@@ -68,6 +69,8 @@ pub enum Confirm {
     DeleteChat(i64, String),
     DeleteBook(PathBuf),
     SaveBooksPassword,
+    SubmitDraft(i64),
+    DiscardDraft(i64),
     Quit,
 }
 
@@ -107,6 +110,7 @@ pub enum EditTarget {
     TaskNotes(i64, PathBuf),
     Config,
     Assignment(i64, String),
+    Draft(i64, PathBuf),
     MoodleApp,
     Pdf(PathBuf),
 }
@@ -118,6 +122,7 @@ pub(crate) enum Bg {
     CoursePull(Result<String, String>),
     Chats(i64, Result<(), String>),
     Book(serde_json::Value),
+    Draft(Result<String, String>),
 }
 
 pub struct NoteEntry {
@@ -248,6 +253,13 @@ pub struct App {
     pub form: Option<Form>,
     pub chats: ChatsState,
     pub sel_settings: usize,
+    /// Tasks → Drafts, switched with [ and ].
+    pub drafts_open: bool,
+    pub drafts: Vec<crate::drafts::Draft>,
+    pub sel_drafts: usize,
+    /// The selected draft's text, read from disk when the selection or the draft changes.
+    pub draft_preview: String,
+    draft_preview_key: Option<(i64, i64)>,
     pub timer_next: String,
     last_sync_try: Instant,
 
@@ -338,6 +350,11 @@ impl App {
             form: None,
             chats: ChatsState::default(),
             sel_settings: 0,
+            drafts_open: false,
+            drafts: Vec::new(),
+            sel_drafts: 0,
+            draft_preview: String::new(),
+            draft_preview_key: None,
             timer_next: String::new(),
             last_sync_try: Instant::now(),
             focus: None,
@@ -367,6 +384,7 @@ impl App {
         self.last_sync = self.db.meta("last_sync").and_then(|v| v.parse().ok());
         self.last_version = self.db.data_version();
         self.reload_chats();
+        self.drafts = crate::drafts::list(&self.db)?;
         self.clamp();
         Ok(())
     }
@@ -487,6 +505,7 @@ impl App {
     fn list_len(&self) -> usize {
         match self.view {
             View::Today => self.today_tasks().len(),
+            View::Tasks if self.drafts_open => self.drafts.len(),
             View::Tasks => self.visible_tasks().len(),
             View::Notes => self.visible_entries().len(),
             View::Habits => self.habits.len(),
@@ -499,6 +518,7 @@ impl App {
     fn sel_mut(&mut self) -> Option<&mut usize> {
         match self.view {
             View::Today => Some(&mut self.sel_today),
+            View::Tasks if self.drafts_open => Some(&mut self.sel_drafts),
             View::Tasks => Some(&mut self.sel_tasks),
             View::Notes => Some(&mut self.sel_notes),
             View::Habits => Some(&mut self.sel_habits),
@@ -514,6 +534,7 @@ impl App {
         self.sel_tasks = self.sel_tasks.min(last(self.visible_tasks().len()));
         self.sel_notes = self.sel_notes.min(last(self.visible_entries().len()));
         self.sel_habits = self.sel_habits.min(last(self.habits.len()));
+        self.sel_drafts = self.sel_drafts.min(last(self.drafts.len()));
         self.sel_agenda = self.sel_agenda.min(last(self.agenda(self.cal_date).len()));
         self.clamp_chats();
     }
@@ -538,6 +559,14 @@ impl App {
 
     /// Refreshes the file preview before a draw, since drawing only reads state.
     pub fn prepare(&mut self) {
+        if self.view == View::Tasks && self.drafts_open {
+            let key = self.drafts.get(self.sel_drafts).map(|d| (d.id, d.updated_at));
+            if key != self.draft_preview_key {
+                self.draft_preview = key.map(|(id, _)| crate::drafts::content_text(id)).unwrap_or_default();
+                self.draft_preview_key = key;
+            }
+            return;
+        }
         if self.view == View::Chats {
             return self.prepare_chats();
         }
@@ -604,6 +633,13 @@ impl App {
                 }
             }
             Bg::Book(event) => self.on_book_event(event),
+            Bg::Draft(r) => {
+                self.draft_preview_key = None;
+                match r {
+                    Ok(m) => self.info(m),
+                    Err(e) => self.error(e),
+                }
+            }
             Bg::Plan(r) => {
                 self.planning = false;
                 match r {
@@ -790,8 +826,86 @@ impl App {
                 self.attempt(r);
                 self.info(format!("Deleted habit {name}"));
             }
+            Confirm::SubmitDraft(id) => self.submit_draft(id),
+            Confirm::DiscardDraft(id) => {
+                let r = crate::drafts::discard(&self.db, id);
+                self.attempt(r);
+                self.info("Draft discarded");
+            }
             Confirm::Quit => self.quit = true,
         }
+    }
+
+    // ---- drafts ---------------------------------------------------------------
+
+    pub fn current_draft(&self) -> Option<crate::drafts::Draft> {
+        self.drafts.get(self.sel_drafts).cloned()
+    }
+
+    fn toggle_drafts(&mut self, open: bool) {
+        self.drafts_open = open;
+        self.preview_scroll = 0;
+        self.clamp();
+    }
+
+    /// Keys in Tasks → Drafts. Returns false for keys the drafts list doesn't use.
+    fn on_draft_key(&mut self, c: char) -> bool {
+        let Some(d) = self.current_draft() else { return matches!(c, 'S' | 'r' | 'o' | 'x') };
+        match c {
+            'S' if d.status == crate::drafts::READY => self.mode = Mode::Confirm(Confirm::SubmitDraft(d.id)),
+            'S' => self.info(format!("Draft {} is {}, so it can't be submitted", d.id, crate::drafts::status_word(&d.status))),
+            'r' if d.status == crate::drafts::WORKING => self.info("It's still being written"),
+            'r' => self.open_prompt(Prompt::DraftFeedback(d.id), ""),
+            'o' => match crate::drafts::pdf(d.id) {
+                Some(p) => self.want_editor = Some(EditTarget::Pdf(p)),
+                None => self.edit_draft(&d),
+            },
+            _ => return false,
+        }
+        true
+    }
+
+    fn edit_draft(&mut self, d: &crate::drafts::Draft) {
+        if d.status != crate::drafts::READY {
+            return self.info(format!("Draft {} is {}", d.id, crate::drafts::status_word(&d.status)));
+        }
+        match crate::drafts::editable(d.id) {
+            Some(path) => self.want_editor = Some(EditTarget::Draft(d.id, path)),
+            None => self.info("This draft has nothing to edit as text. Press o to look at it"),
+        }
+    }
+
+    /// W on a Moodle task: Claude writes a draft in the background, and it shows up in Drafts.
+    fn draft_current_task(&mut self, feedback: Option<String>, task_id: Option<i64>) {
+        let id = match task_id {
+            Some(id) => id,
+            None => {
+                let Some(t) = self.current_task() else { return };
+                if let Err(e) = crate::drafts::check_task(&t) {
+                    return self.error(e.to_string());
+                }
+                t.id
+            }
+        };
+        let cfg = self.cfg.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let r = crate::drafts::run(&cfg, id, feedback.as_deref()).map(|()| "Draft ready in Tasks → Drafts".to_string()).map_err(|e| format!("Draft: {e}"));
+            let _ = tx.send(Bg::Draft(r));
+        });
+        self.toggle_drafts(true);
+        self.info("Writing a draft. It takes a few minutes, and you can keep working");
+        self.refresh();
+    }
+
+    fn submit_draft(&mut self, id: i64) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let r = crate::db::Db::open(&crate::config::db_path()).and_then(|db| crate::drafts::submit(&db, id));
+            let _ = tx.send(Bg::Draft(r.map_err(|e| format!("Not handed in: {e}"))));
+        });
+        self.info("Uploading to Moodle…");
+        self.refresh();
     }
 
     fn trash_entry(&mut self, path: &Path) -> Result<()> {
@@ -949,6 +1063,11 @@ impl App {
             Prompt::ChatTitle(id) => self.create_or_rename_chat(id, &text),
             Prompt::ChatAsk if text.is_empty() => Ok(()),
             Prompt::ChatAsk => self.ask_chat(text),
+            Prompt::DraftFeedback(_) if text.is_empty() => Ok(()),
+            Prompt::DraftFeedback(id) => {
+                let task = crate::drafts::get(&self.db, id).map(|d| d.task_id);
+                task.map(|t| self.draft_current_task(Some(text), Some(t)))
+            }
             Prompt::BooksEmail if text.is_empty() => Ok(()),
             Prompt::BooksEmail => self.set_books_email(&text),
             Prompt::BooksPassword => Ok(()),
@@ -1190,6 +1309,14 @@ impl App {
             EditTarget::Pdf(_) => {}
             // You may have just submitted something, so check right away.
             EditTarget::Assignment(..) | EditTarget::MoodleApp => self.start_sync(),
+            EditTarget::Draft(id, path) => {
+                // A PDF is made from its HTML, so it's rebuilt after you edit that.
+                if path.extension().is_some_and(|e| e == "html") {
+                    let r = crate::drafts::rerender(id);
+                    self.attempt(r);
+                }
+                self.draft_preview_key = None;
+            }
             EditTarget::TaskNotes(id, tmp) => {
                 let r = std::fs::read_to_string(&tmp).map_err(Into::into).and_then(|text| self.db.set_notes(id, text.trim_end()));
                 let _ = std::fs::remove_file(&tmp);
@@ -1473,6 +1600,11 @@ impl App {
                 }
             }
             View::Calendar => self.edit_agenda(),
+            View::Tasks if self.drafts_open => {
+                if let Some(d) = self.current_draft() {
+                    self.edit_draft(&d);
+                }
+            }
             View::Tasks => {
                 let Some(t) = self.current_task() else { return };
                 if t.is_moodle() {
@@ -1526,6 +1658,10 @@ impl App {
             'G' => self.set_sel(if times > 1 { times as usize - 1 } else { usize::MAX }),
             'J' => self.preview_scroll = self.preview_scroll.saturating_add(3),
             'K' => self.preview_scroll = self.preview_scroll.saturating_sub(3),
+            '[' | ']' if self.view == View::Tasks => self.toggle_drafts(c == ']'),
+            _ if self.view == View::Tasks && self.drafts_open => {
+                self.on_draft_key(c);
+            }
             _ => {
                 if matches!(self.view, View::Today | View::Tasks) {
                     self.on_task_key(c);
@@ -1538,6 +1674,7 @@ impl App {
         match c {
             'x' => self.toggle_current(),
             'L' => self.teach_current_task(),
+            'W' => self.draft_current_task(None, None),
             'o' | 'a' => self.open_prompt(Prompt::NewTask(None), ""),
             'i' | 'e' => self.edit_current_title(),
             'D' => self.edit_current_due(),
@@ -1590,6 +1727,11 @@ impl App {
 
     fn delete_current(&mut self) {
         match self.view {
+            View::Tasks if self.drafts_open => {
+                if let Some(d) = self.current_draft() {
+                    self.mode = Mode::Confirm(Confirm::DiscardDraft(d.id));
+                }
+            }
             View::Today | View::Tasks => self.delete_task_current(),
             View::Week | View::Calendar => match self.agenda(self.cal_date).get(self.sel_agenda).cloned() {
                 Some(AgendaItem::Task(_)) => self.delete_task_current(),
@@ -2274,7 +2416,7 @@ pub fn run_external(cfg: &Config, target: &EditTarget) -> Result<()> {
     }
     let mut command = match target {
         EditTarget::Pdf(_) => unreachable!("handled above"),
-        EditTarget::Note(path) | EditTarget::TaskNotes(_, path) => editor_command(cfg, path),
+        EditTarget::Note(path) | EditTarget::TaskNotes(_, path) | EditTarget::Draft(_, path) => editor_command(cfg, path),
         EditTarget::Config => editor_command(cfg, &config_path()),
         EditTarget::MoodleApp => with_opener(std::process::Command::new(find_bin("moodle"))),
         EditTarget::Assignment(id, course) => {

@@ -3,6 +3,7 @@ mod books;
 mod chats;
 mod config;
 mod db;
+mod drafts;
 mod files;
 mod form;
 mod pdf;
@@ -59,6 +60,13 @@ enum Cmd {
     Listen,
     /// Plan study sessions for your upcoming tests
     Plan,
+    /// Write a draft of a Moodle assignment for you to check in Tasks → Drafts
+    Draft {
+        task: i64,
+        /// What to change in the last draft
+        #[arg(long)]
+        feedback: Option<String>,
+    },
     /// Send reminders that are due now: what the 10-minute timer runs
     Remind {
         /// Only print what would be sent
@@ -160,6 +168,7 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Listen) => replies::listen(&cfg),
         Some(Cmd::Phone) => phone(&cfg),
+        Some(Cmd::Draft { task, feedback }) => drafts::run(&cfg, task, feedback.as_deref()),
         Some(Cmd::Remind { preview }) => reminders::run(&cfg, preview),
         Some(Cmd::Replies { state }) => {
             let mut cfg = cfg;

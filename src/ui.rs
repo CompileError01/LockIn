@@ -198,6 +198,7 @@ fn prompt_label(p: &Prompt) -> &'static str {
         Prompt::NewHabit => "new habit: ",
         Prompt::ChatTitle(_) => "chat name (optional): ",
         Prompt::ChatAsk => "ask claude: ",
+        Prompt::DraftFeedback(_) => "what should change? ",
         Prompt::BooksEmail => "digi4school email: ",
         Prompt::BooksPassword => "digi4school password (not saved): ",
     }
@@ -225,6 +226,8 @@ fn draw_cmdline(f: &mut Frame, app: &App, area: Rect) {
                 Confirm::DeleteTutorNote(p) => format!("Delete the note {}? (y/n)", p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
                 Confirm::RestartLesson(_) => "Start this lesson over and erase its conversation? Claude's notes stay. (y/n)".to_string(),
                 Confirm::DeleteAgenda(title) => format!("Delete {title}? (y or d to confirm, u undoes it later)"),
+                Confirm::SubmitDraft(id) => app.drafts.iter().find(|d| d.id == *id).map_or_else(|| "Submit this draft? (y/n)".to_string(), crate::drafts::confirm_text),
+                Confirm::DiscardDraft(id) => format!("Discard draft {id}? Its files are deleted. (y/n)"),
                 Confirm::Quit => "A focus session is running and will be lost. Quit? (y/n)".to_string(),
             };
             f.render_widget(Paragraph::new(Span::styled(q, st(YELLOW))), area);
@@ -590,6 +593,17 @@ fn draw_today(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
+    let [bar, area] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let waiting = app.drafts.iter().filter(|d| d.status == crate::drafts::READY).count();
+    let tab = |name: String, on: bool| if on { Span::styled(format!(" {name} "), Style::default().fg(BG).bg(ORANGE).add_modifier(Modifier::BOLD)) } else { Span::styled(format!(" {name} "), st(MUTED)) };
+    let drafts_label = if waiting > 0 { format!("Drafts ({waiting})") } else { "Drafts".to_string() };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![tab("Tasks".into(), !app.drafts_open), Span::raw(" "), tab(drafts_label, app.drafts_open), Span::styled("   [ ] switch", st(DIM))])),
+        bar,
+    );
+    if app.drafts_open {
+        return draw_drafts(f, app, area);
+    }
     let (list, preview) = with_preview(area);
     let tasks = app.visible_tasks();
     if tasks.is_empty() {
@@ -601,6 +615,83 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
         let lines = tasks.get(app.sel_tasks).map(|t| task_detail(t)).unwrap_or_default();
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((app.preview_scroll, 0)).block(panel(" Details ")), p);
     }
+}
+
+fn draft_color(status: &str) -> Color {
+    match status {
+        crate::drafts::READY => YELLOW,
+        crate::drafts::SUBMITTED => GREEN,
+        crate::drafts::FAILED => RED,
+        _ => BLUE,
+    }
+}
+
+fn draw_drafts(f: &mut Frame, app: &App, area: Rect) {
+    let wide = area.width >= 100;
+    let [list, detail] = if wide {
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area)
+    } else {
+        Layout::vertical([Constraint::Length((app.drafts.len() as u16 + 1).clamp(3, 8)), Constraint::Min(1)]).areas(area)
+    };
+    if app.drafts.is_empty() {
+        empty(f, list, "No drafts. Press W on a Moodle task, or text LockIn \"do\" and the task.");
+    } else {
+        let width = list.width as usize;
+        let rows = app
+            .drafts
+            .iter()
+            .map(|d| {
+                let word = crate::drafts::status_word(&d.status);
+                let course = course_tag(&d.course);
+                let room = width.saturating_sub(word.width() + course.width() + 12);
+                Row::Item(Line::from(vec![
+                    Span::styled(format!("{:<width$} ", fit(&d.title, room), width = room), st(FG)),
+                    Span::styled(format!("{course} "), st(BLUE)),
+                    Span::styled(word.to_string(), st(draft_color(&d.status))),
+                ]))
+            })
+            .collect();
+        draw_buffer(f, list, rows, app.sel_drafts, true);
+    }
+    let Some(d) = app.drafts.get(app.sel_drafts) else {
+        f.render_widget(Paragraph::new("").block(panel(" Draft ")), detail);
+        return;
+    };
+    let label = |name: &str, value: String, color: Color| Line::from(vec![Span::styled(format!("{name:<9}"), st(DIM)), Span::styled(value, st(color))]);
+    let mut l = vec![Line::from(Span::styled(d.title.clone(), st(FG).add_modifier(Modifier::BOLD)))];
+    l.push(label("status", crate::drafts::status_word(&d.status).to_string(), draft_color(&d.status)));
+    l.push(label("written", format!("{} ({})", fmt_abs(d.updated_at), fmt_rel(d.updated_at)), MUTED));
+    let files: Vec<String> = crate::drafts::upload_files(d.id).iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).collect();
+    if !files.is_empty() {
+        l.push(label("uploads", files.join(", "), FG));
+    }
+    if !d.replaces.is_empty() {
+        l.push(label("replaces", d.replaces.clone(), YELLOW));
+    }
+    if !d.error.is_empty() {
+        l.push(label("problem", d.error.clone(), RED));
+    }
+    if !d.summary.is_empty() {
+        l.push(Line::default());
+        l.push(Line::from(vec![Span::styled("✻ ", st(ORANGE)), Span::styled(d.summary.clone(), st(FG))]));
+    }
+    if !d.check.is_empty() {
+        l.push(Line::default());
+        l.push(Line::from(vec![Span::styled("Check: ", st(YELLOW).add_modifier(Modifier::BOLD)), Span::styled(d.check.clone(), st(FG))]));
+    }
+    if !d.statement.is_empty() {
+        l.push(Line::default());
+        l.push(Line::from(vec![Span::styled("Submitting accepts: ", st(YELLOW)), Span::styled(d.statement.clone(), st(MUTED))]));
+    }
+    if d.status == crate::drafts::READY {
+        l.push(Line::default());
+        l.push(Line::from(Span::styled("Enter edit   o view   r redo with changes   S submit   dd discard", st(DIM))));
+    }
+    if !app.draft_preview.is_empty() {
+        l.push(Line::default());
+        l.extend(md_lines(&app.draft_preview));
+    }
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }).scroll((app.preview_scroll, 0)).block(panel(" Draft ")), detail);
 }
 
 /// Tests in red and study sessions in terracotta, here and on the month calendar.
@@ -1795,8 +1886,12 @@ J K  scroll the details pane    Tab, gt, gT  change tab   3gt  go to tab 3
 o  new task   e  edit title   D  set due date   x  done, or reopen
 + -  priority   dd  delete    u  undo           f  filter all, Moodle, mine
 zd  show finished   gx  open in browser   gf  focus on this task   L  learn it
+W  Claude drafts this Moodle assignment for you to check   [ ]  Tasks, Drafts
 Enter on a Moodle task opens it in the Moodle CLI, where u uploads files.
 Enter on your own task edits its notes.
+
+In Drafts:  Enter edit   o view the PDF   r redo with changes   dd discard
+S  submit to Moodle for grading, after you confirm. Only this computer can submit.
 
 Quick add:  Read chapter 4 @fri 18:00 !! #AM ~45m
 Dates:  today, tom, fri, +3d, +4h, 14.11., 2026-12-01 08:15, 21:00
