@@ -1807,6 +1807,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
 
         let cfg = crate::config::Config { vault: vault.display().to_string(), ..Default::default() };
+        crate::config::save(&cfg).unwrap(); // the app rereads settings from disk before changing one
         let mut app = App::new(cfg).unwrap();
         let press = |app: &mut App, keys: &str| {
             for c in keys.chars() {

@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn qr_codes_are_square_and_framed() {
-        let text = qr_text("https://ntfy.sh/lockin-0123456789abcdef0123456789abcdef").unwrap();
+        let text = qr_text("https://ntfy.sh/example-topic-for-this-test-only-000000").unwrap();
         let lines: Vec<&str> = text.lines().collect();
         let width = lines[0].chars().count();
         assert!(width >= 25, "{width}");
