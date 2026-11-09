@@ -99,4 +99,3 @@ start off, and you can turn them on in the Settings tab.
 cargo test
 cargo build --release && install -m755 target/release/lockin ~/.local/bin/lockin
 ```
-# LockIn
