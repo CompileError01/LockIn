@@ -23,6 +23,9 @@ pub fn timer_unit(cfg: &Config) -> String {
     )
 }
 
+/// Every 10 minutes. A missed run isn't caught up: the next one sees the same deadlines.
+const REMIND_TIMER: &str = "[Unit]\nDescription=LockIn reminders every 10 minutes\n\n[Timer]\nOnCalendar=*:0/10\nAccuracySec=30s\n\n[Install]\nWantedBy=timers.target\n";
+
 fn systemctl(args: &[&str]) -> Result<()> {
     let out = Command::new("systemctl").arg("--user").args(args).stdin(Stdio::null()).output().context("could not run systemctl")?;
     if !out.status.success() {
@@ -57,6 +60,17 @@ pub fn apply_timer(cfg: &Config) -> Result<()> {
     } else {
         systemctl(&["disable", "--now", "lockin-daily.timer"])?;
     }
+    std::fs::write(
+        dir.join("lockin-remind.service"),
+        format!("[Unit]\nDescription=LockIn reminders\n\n[Service]\nType=oneshot\nEnvironment=PATH={path}\nExecStart={} remind\nTimeoutStartSec=5min\n", exe.display()),
+    )?;
+    std::fs::write(dir.join("lockin-remind.timer"), REMIND_TIMER)?;
+    systemctl(&["daemon-reload"])?;
+    if cfg.reminders_enabled {
+        systemctl(&["enable", "--now", "lockin-remind.timer"])?;
+    } else {
+        systemctl(&["disable", "--now", "lockin-remind.timer"])?;
+    }
     Ok(())
 }
 
@@ -68,7 +82,7 @@ pub fn set_replies(cfg: &mut Config, on: bool) -> Result<bool> {
     if on {
         cfg.ntfy_enabled = true;
         if !cfg.ntfy_reply_topic_ready {
-            cfg.ntfy_topic = crate::config::random_topic()?;
+            crate::config::change_topic(cfg, crate::config::random_topic()?);
             cfg.ntfy_reply_topic_ready = true;
             changed = true;
         }
@@ -467,11 +481,51 @@ pub fn desktop(title: &str, body: &str, critical: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn ntfy(cfg: &Config, title: &str, body: &str, high: bool) -> Result<()> {
-    let payload = json!({
-        "topic": cfg.ntfy_topic, "title": title, "message": body,
-        "priority": if high { 4 } else { 3 }, "tags": ["spiral_notepad", crate::replies::OUT_TAG],
+/// One notification. Buttons and the link only show on the phone.
+#[derive(Default, Clone, Debug)]
+pub struct Push {
+    pub title: String,
+    pub body: String,
+    pub urgent: bool,
+    /// A short emoji name from ntfy's list, shown next to the title.
+    pub icon: String,
+    /// Buttons that text LockIn back, as (label, message). They're dropped when replies are off.
+    pub buttons: Vec<(String, String)>,
+    /// Opens when the notification is tapped, like the task on Moodle.
+    pub click: String,
+}
+
+impl Push {
+    pub fn new(title: impl Into<String>, body: impl Into<String>) -> Push {
+        Push { title: title.into(), body: body.into(), ..Default::default() }
+    }
+}
+
+/// The JSON ntfy takes. Buttons post straight to the topic, so a tap can't go to the wrong one.
+pub fn ntfy_payload(cfg: &Config, topic: &str, push: &Push) -> Value {
+    let icon = if push.icon.is_empty() { "spiral_notepad" } else { push.icon.as_str() };
+    let mut payload = json!({
+        "topic": topic, "title": push.title, "message": push.body,
+        "priority": if push.urgent { 4 } else { 3 }, "tags": [icon, crate::replies::OUT_TAG],
     });
+    if cfg.ntfy_replies && topic == cfg.ntfy_topic && !push.buttons.is_empty() {
+        let url = format!("{}/{}", cfg.ntfy_server.trim_end_matches('/'), topic);
+        let actions: Vec<Value> = push
+            .buttons
+            .iter()
+            .take(3)
+            .map(|(label, text)| json!({"action": "http", "label": label, "url": url, "method": "POST", "body": text, "clear": true}))
+            .collect();
+        payload["actions"] = json!(actions);
+    }
+    if push.click.starts_with("https://") {
+        payload["click"] = json!(push.click);
+    }
+    payload
+}
+
+pub fn ntfy_to(cfg: &Config, topic: &str, push: &Push) -> Result<()> {
+    let payload = ntfy_payload(cfg, topic, push);
     let mut child = Command::new(find_bin("curl"))
         .args(["-fsS", "-m", "20", "--retry", "3", "--retry-all-errors", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-"])
         .arg(&cfg.ntfy_server)
@@ -488,11 +542,19 @@ pub fn ntfy(cfg: &Config, title: &str, body: &str, high: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn ntfy(cfg: &Config, title: &str, body: &str, high: bool) -> Result<()> {
+    ntfy_to(cfg, &cfg.ntfy_topic, &Push { urgent: high, ..Push::new(title, body) })
+}
+
 /// Sends to every enabled channel. One failing channel doesn't stop the other.
 pub fn notify_all(cfg: &Config, title: &str, body: &str, urgent: bool, wait_for_desktop: bool) -> Vec<String> {
+    send_push(cfg, &Push { urgent, ..Push::new(title, body) }, wait_for_desktop)
+}
+
+pub fn send_push(cfg: &Config, push: &Push, wait_for_desktop: bool) -> Vec<String> {
     let mut errors = Vec::new();
     if cfg.ntfy_enabled {
-        if let Err(e) = ntfy(cfg, title, body, urgent) {
+        if let Err(e) = ntfy_to(cfg, &cfg.ntfy_topic, push) {
             errors.push(e.to_string());
         }
     }
@@ -500,7 +562,7 @@ pub fn notify_all(cfg: &Config, title: &str, body: &str, urgent: bool, wait_for_
         // A run caught up at login can start before Hyprland and mako are up, so keep trying for a while.
         let attempts = if wait_for_desktop { 20 } else { 1 };
         for i in 0..attempts {
-            match desktop(title, body, urgent) {
+            match desktop(&push.title, &push.body, push.urgent) {
                 Ok(()) => break,
                 Err(e) if i + 1 == attempts => errors.push(e.to_string()),
                 Err(_) => std::thread::sleep(std::time::Duration::from_secs(15)),
@@ -601,7 +663,8 @@ pub fn daily(db: &mut Db, cfg: &Config) -> Result<()> {
     } else if brief_out.is_none() && cfg.daily_use_claude {
         body += "\n⚠ Claude was unavailable, so this list has no plan.";
     }
-    let errors = notify_all(cfg, &title, &body, urgent, true);
+    let push = Push { urgent, buttons: vec![("What's due".into(), "list".into()), ("Sync".into(), "sync".into())], ..Push::new(title, body) };
+    let errors = send_push(cfg, &push, true);
     db.set_meta("last_daily", &now_ts().to_string())?;
     for p in problems.iter().chain(&errors) {
         eprintln!("lockin: {p}");

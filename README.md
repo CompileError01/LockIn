@@ -28,12 +28,13 @@ lockin daily      sync Moodle, ask Claude, send notifications (what the timer ru
 lockin sync       pull deadlines and events from Moodle, and your timetable and tests from Untis
 lockin brief      ask Claude for a new plan and print it
 lockin plan       plan study sessions for your upcoming tests
+lockin remind --preview   show which reminders would be sent right now
 lockin today      print open tasks
 lockin add "Read chapter 4 @fri 18:00 !! #AM ~45m"
 lockin pdf FILE   read a PDF in the terminal
 lockin teach FILE "question"   ask a teaching chat about a file
 lockin notify     send a test notification
-lockin phone      QR code that connects your phone
+lockin phone      connect your phone, and check that texting works
 lockin replies on|off   text LockIn from your phone
 lockin status     show paths, phone topic and last run times
 lockin install    apply your settings to the daily systemd timer
@@ -51,6 +52,23 @@ computer was off, it runs after your next login. The job:
 4. Sends the summary to your desktop through mako and to your phone through ntfy.
 
 If Moodle or Claude fails, you still get a notification from the latest data, with a warning.
+
+## Reminders
+
+Between briefings, `lockin-remind.timer` checks every 10 minutes and sends, once each:
+
+- **Deadline warnings** 24, 6 and 2 hours before something is due. If several have passed at once, like for
+  a task added late, you only get the closest one. A Moodle deadline is checked against a fresh sync first,
+  so work you've handed in doesn't get a warning.
+- **Study sessions** from the Week tab, 10 minutes before they start.
+- **Tests tomorrow**, from 17:00 the evening before.
+- **A nudge to study** at 17:00, if you've done less than 20 minutes in the focus timer today, nothing is
+  planned for later, and something is due within a week.
+
+Nothing is sent during quiet hours, 22:00 to 07:00. Deadline warnings wait until they're over. On the phone,
+reminders have buttons: **Done ✓** ticks the task off and **What's due** lists open tasks (both need phone
+replies on), and tapping a Moodle reminder opens the assignment. All of this is in the Settings tab under
+Reminders. It uses no Claude.
 
 ## What Claude can see and do
 
@@ -156,13 +174,24 @@ start off, and you can turn them on in the Settings tab.
 
 ### Texting LockIn back
 
-Run `lockin replies on`, or use the Settings tab. The first time, you get a new private topic. Run
-`lockin phone` and scan the QR code to connect your phone: it also sends a test message, so you can see
-you're on the right topic. Then send a message to that topic from the ntfy app or the page the code opens:
+Run `lockin replies on`, or use the Settings tab. The first time, you get a new private topic. Then run
+`lockin phone`:
+
+1. Scan the QR code with your phone's camera. It opens the ntfy app straight to the topic, so there's
+   nothing to type. Tap Subscribe.
+2. In the app, open that subscription (its name ends in the characters `lockin phone` shows) and send `hi`.
+3. `lockin phone` waits for it and tells you when your phone is connected. If nothing arrives, it says what
+   to check.
+
+If you have older LockIn subscriptions in the app, delete them. A message sent to an old topic only gets a
+reply saying LockIn moved. `lockin status` shows when the last text from your phone arrived.
+
+Then write to LockIn in that subscription, or tap the buttons on its notifications:
 
 ```
 remind me to call mum tomorrow at 5     Claude works out what you mean
 what's due this week?                   Claude answers from your tasks and calendar
+hi                                      checks the connection, with no Claude
 add Read chapter 4 @fri 18:00           adds a task, with no Claude
 list                                    open tasks, with their numbers
 done 12                                 ticks off task 12

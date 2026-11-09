@@ -87,12 +87,13 @@ if $UNINSTALL; then
     if systemd_user_works; then
         systemctl --user disable --now lockin-daily.timer >/dev/null 2>&1 || true
         systemctl --user disable --now lockin-listen.service >/dev/null 2>&1 || true
+        systemctl --user disable --now lockin-remind.timer >/dev/null 2>&1 || true
     fi
-    rm -f "$HOME/.config/systemd/user/lockin-daily.timer" "$HOME/.config/systemd/user/lockin-daily.service" "$HOME/.config/systemd/user/lockin-listen.service" "$BIN_DIR/lockin"
+    rm -f "$HOME/.config/systemd/user/lockin-daily.timer" "$HOME/.config/systemd/user/lockin-daily.service" "$HOME/.config/systemd/user/lockin-listen.service" "$HOME/.config/systemd/user/lockin-remind.timer" "$HOME/.config/systemd/user/lockin-remind.service" "$BIN_DIR/lockin"
     if systemd_user_works; then
         systemctl --user daemon-reload >/dev/null 2>&1 || true
     fi
-    ok "Removed the program and the daily timer"
+    ok "Removed the program and its timers"
     note "Your data is still here. Delete these folders if you don't want it:"
     note "  $HOME/.config/lockin"
     note "  $HOME/.local/share/lockin"

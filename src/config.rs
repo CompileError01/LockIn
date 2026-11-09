@@ -31,6 +31,18 @@ pub struct Config {
     pub ntfy_replies: bool,
     /// The topic was replaced with a fresh one when replies were first turned on.
     pub ntfy_reply_topic_ready: bool,
+    /// Topics used before. A text sent to one gets a fixed "LockIn moved" answer and nothing else.
+    pub ntfy_old_topics: Vec<String>,
+    /// Sends deadline warnings, study heads-ups and nudges through a 10-minute timer.
+    pub reminders_enabled: bool,
+    /// Hours before a deadline to warn. Only the closest one that's passed gets sent.
+    pub remind_deadline_hours: Vec<i64>,
+    /// Minutes before a study session to send a heads-up. 0 turns this off.
+    pub remind_study_minutes: i64,
+    /// `HH:MM` for the daily study nudge and the tests-tomorrow warning. Empty turns both off.
+    pub remind_nudge_time: String,
+    /// `HH:MM-HH:MM` with no reminders. Empty means none.
+    pub quiet_hours: String,
     pub focus_minutes: i64,
     pub break_minutes: i64,
     /// Runs the systemd timer at all.
@@ -75,6 +87,12 @@ impl Default for Config {
             ntfy_topic: String::new(),
             ntfy_replies: false,
             ntfy_reply_topic_ready: false,
+            ntfy_old_topics: Vec::new(),
+            reminders_enabled: true,
+            remind_deadline_hours: vec![24, 6, 2],
+            remind_study_minutes: 10,
+            remind_nudge_time: "17:00".into(),
+            quiet_hours: "22:00-07:00".into(),
             focus_minutes: 25,
             break_minutes: 5,
             daily_enabled: true,
@@ -127,6 +145,19 @@ pub fn random_topic() -> Result<String> {
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     Ok(format!("lockin-{hex}"))
+}
+
+/// Switches to a new topic, remembering the old one so a phone still on it can be told.
+pub fn change_topic(cfg: &mut Config, topic: String) {
+    if topic == cfg.ntfy_topic {
+        return;
+    }
+    let old = std::mem::replace(&mut cfg.ntfy_topic, topic);
+    if !old.is_empty() {
+        cfg.ntfy_old_topics.retain(|t| *t != old && *t != cfg.ntfy_topic);
+        cfg.ntfy_old_topics.insert(0, old);
+        cfg.ntfy_old_topics.truncate(3);
+    }
 }
 
 pub fn save(cfg: &Config) -> Result<()> {

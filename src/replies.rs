@@ -27,6 +27,9 @@ const MAX_ACTIONS: usize = 5;
 const MAX_TITLE_CHARS: usize = 120;
 const HISTORY_TURNS: usize = 6;
 
+const MOVED: &str = "LockIn doesn't listen here any more: it moved to a new private topic. On your computer, run lockin phone and scan the code, then delete this subscription.";
+const CONNECTED: &str = "✓ Connected. LockIn got your message. Try: help";
+
 const HELP: &str = "Just write what you need, like \"remind me to call mum tomorrow at 5\". These use no Claude:\nlist: open tasks\nadd Read chapter 4 @fri 18:00: new task\ndone 12: tick off task 12\nsync: update from Moodle\nhelp: this message";
 
 const SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["reply","actions"],"properties":{
@@ -149,6 +152,7 @@ pub fn quick_command(db: &mut Db, text: &str) -> Option<Result<String>> {
     let rest = rest.trim();
     match first.to_lowercase().as_str() {
         "help" | "?" if rest.is_empty() => Some(Ok(HELP.to_string())),
+        "hi" | "hello" | "hey" | "hallo" | "servus" | "ping" | "test" if rest.is_empty() => Some(Ok(CONNECTED.to_string())),
         "list" | "tasks" if rest.is_empty() => Some(list_tasks(db)),
         "sync" if rest.is_empty() => Some(sync_reply(db)),
         "done" => rest.parse::<i64>().ok().map(|id| complete_task(db, id)),
@@ -259,6 +263,7 @@ impl Limiter {
 }
 
 /// A message LockIn should act on: a real message, not one of its own, and not seen before.
+/// The ntfy app puts what you typed in `message`, but a title alone counts too.
 pub fn should_handle(event: &Value, seen: &[String]) -> Option<String> {
     if event["event"] != "message" {
         return None;
@@ -271,7 +276,19 @@ pub fn should_handle(event: &Value, seen: &[String]) -> Option<String> {
     if seen.iter().any(|s| s == id) {
         return None;
     }
-    event["message"].as_str().map(str::trim).filter(|m| !m.is_empty()).map(str::to_string)
+    let pick = |k: &str| event[k].as_str().map(str::trim).filter(|m| !m.is_empty()).map(str::to_string);
+    pick("message").or_else(|| pick("title"))
+}
+
+/// The topics to listen on: yours first, then old ones that only get told LockIn moved.
+pub fn topics(cfg: &Config) -> Vec<String> {
+    let mut all = vec![cfg.ntfy_topic.clone()];
+    for t in &cfg.ntfy_old_topics {
+        if !t.is_empty() && !all.contains(t) {
+            all.push(t.clone());
+        }
+    }
+    all
 }
 
 fn send(cfg: &Config, text: &str) {
@@ -293,11 +310,14 @@ pub fn listen(cfg: &Config) -> Result<()> {
         db.set_meta("ntfy_since", &crate::timeutil::now_ts().to_string())?;
     }
     println!("listening for phone replies");
+    let topics = topics(cfg);
+    // An old topic is told once an hour at most, so someone spamming it can't use up the real limit.
+    let mut moved_told: std::collections::HashMap<String, Instant> = std::collections::HashMap::new();
     let mut wait = 5;
     loop {
         // Messages sent while this computer was off are picked up from ntfy's cache, for about 12 hours.
         let since = db.meta("ntfy_since").unwrap_or_else(|| "now".to_string());
-        let url = format!("{}/{}/json?since={since}", cfg.ntfy_server.trim_end_matches('/'), cfg.ntfy_topic);
+        let url = format!("{}/{}/json?since={since}", cfg.ntfy_server.trim_end_matches('/'), topics.join(","));
         // A stalled connection gets replaced: ntfy sends a keepalive at least every minute or so.
         let child = Command::new(find_bin("curl")).args(["-sSN", "--connect-timeout", "20", "--speed-limit", "1", "--speed-time", "180"]).arg(&url).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
         let mut child = match child {
@@ -320,6 +340,19 @@ pub fn listen(cfg: &Config) -> Result<()> {
                 if let Some(time) = event["time"].as_i64() {
                     db.set_meta("ntfy_since", &time.to_string())?;
                 }
+                let topic = event["topic"].as_str().unwrap_or(&cfg.ntfy_topic);
+                if topic != cfg.ntfy_topic {
+                    let recent = moved_told.get(topic).is_some_and(|t| t.elapsed() < Duration::from_secs(3600));
+                    if !recent {
+                        println!("a message came to an old topic");
+                        moved_told.insert(topic.to_string(), Instant::now());
+                        if let Err(e) = services::ntfy_to(cfg, topic, &services::Push::new("LockIn moved", MOVED)) {
+                            eprintln!("lockin listen: couldn't answer on the old topic: {e}");
+                        }
+                    }
+                    continue;
+                }
+                db.set_meta("ntfy_last_in", &crate::timeutil::now_ts().to_string())?;
                 match limiter.check(Instant::now()) {
                     Some(true) => {
                         println!("handling a message");
@@ -417,6 +450,8 @@ mod tests {
         assert!(quick_command(&mut d, "list").unwrap().unwrap().starts_with(&format!("{id}: Read chapter 4")));
         assert!(quick_command(&mut d, &format!("done {id}")).unwrap().unwrap().starts_with("✓ Done"));
         assert!(d.tasks().unwrap()[0].done);
+        assert!(quick_command(&mut d, "Hi").unwrap().unwrap().starts_with("✓ Connected"));
+        assert!(quick_command(&mut d, "hi, what's due?").is_none());
         // Normal sentences that happen to start with these words are for Claude.
         for sentence in ["done with my homework, what's next?", "list my deadlines for friday", "help me plan tonight", "add", "what's due?"] {
             assert!(quick_command(&mut d, sentence).is_none(), "{sentence}");
@@ -432,7 +467,35 @@ mod tests {
         assert_eq!(should_handle(&msg(json!(null), "a", "hi"), &["a".to_string()]), None, "already handled");
         assert_eq!(should_handle(&msg(json!(null), "a", "   "), &[]), None);
         assert_eq!(should_handle(&json!({"event": "keepalive", "id": "k"}), &[]), None);
+        assert_eq!(should_handle(&json!({"event": "message", "id": "t", "title": "list", "message": ""}), &[]).as_deref(), Some("list"), "a title alone");
         assert_eq!(should_handle(&json!({"event": "open", "id": "o", "message": "x"}), &[]), None);
+    }
+
+    #[test]
+    fn old_topics_are_listened_to_after_the_current_one() {
+        let mut cfg = Config { ntfy_topic: "a".into(), ..Config::default() };
+        crate::config::change_topic(&mut cfg, "b".into());
+        crate::config::change_topic(&mut cfg, "c".into());
+        crate::config::change_topic(&mut cfg, "a".into());
+        assert_eq!(topics(&cfg), vec!["a", "c", "b"]);
+        for t in ["d", "e", "f"] {
+            crate::config::change_topic(&mut cfg, t.into());
+        }
+        assert_eq!(cfg.ntfy_old_topics.len(), 3, "only a few are kept");
+    }
+
+    #[test]
+    fn buttons_post_to_the_current_topic_only_when_replies_are_on() {
+        let push = services::Push { buttons: vec![("Done".into(), "done 3".into())], click: "https://moodle/x".into(), ..services::Push::new("t", "b") };
+        let mut cfg = Config { ntfy_topic: "now".into(), ntfy_replies: true, ..Config::default() };
+        let p = services::ntfy_payload(&cfg, "now", &push);
+        assert_eq!(p["actions"][0]["url"], "https://ntfy.sh/now");
+        assert_eq!(p["actions"][0]["body"], "done 3");
+        assert_eq!(p["click"], "https://moodle/x");
+        assert!(p["tags"].as_array().unwrap().iter().any(|t| t == OUT_TAG), "never answered by itself");
+        assert!(services::ntfy_payload(&cfg, "old", &push).get("actions").is_none());
+        cfg.ntfy_replies = false;
+        assert!(services::ntfy_payload(&cfg, "now", &push).get("actions").is_none());
     }
 
     #[test]

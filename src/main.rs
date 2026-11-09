@@ -7,6 +7,7 @@ mod files;
 mod form;
 mod pdf;
 mod planner;
+mod reminders;
 mod replies;
 mod services;
 mod settings;
@@ -58,6 +59,12 @@ enum Cmd {
     Listen,
     /// Plan study sessions for your upcoming tests
     Plan,
+    /// Send reminders that are due now: what the 10-minute timer runs
+    Remind {
+        /// Only print what would be sent
+        #[arg(long)]
+        preview: bool,
+    },
     /// Send a test notification to the desktop and phone
     Notify,
     /// Install or update the daily systemd timer from your settings
@@ -152,18 +159,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Cmd::Listen) => replies::listen(&cfg),
-        Some(Cmd::Phone) => {
-            let link = format!("{}/{}", cfg.ntfy_server.trim_end_matches('/'), cfg.ntfy_topic);
-            println!("{}", services::qr_text(&link)?);
-            println!("Scan this, then subscribe to the topic in the ntfy app or on that page.");
-            println!("Keep it private: anyone with this code can read your replies and send commands.");
-            if !cfg.ntfy_replies {
-                println!("\nPhone replies are off, so you only get notifications. Turn them on with: lockin replies on");
-            }
-            services::ntfy(&cfg, "LockIn", "This is the right topic. Write here to talk to LockIn. Try: help", false)?;
-            println!("\nA test message was just sent. If it shows up on your phone, you're on the right topic.");
-            Ok(())
-        }
+        Some(Cmd::Phone) => phone(&cfg),
+        Some(Cmd::Remind { preview }) => reminders::run(&cfg, preview),
         Some(Cmd::Replies { state }) => {
             let mut cfg = cfg;
             let on = match state.as_str() {
@@ -203,9 +200,59 @@ fn main() -> Result<()> {
             println!("replies     {} (listener: {})", if cfg.ntfy_replies { "on" } else { "off" }, services::listener_state());
             println!("last sync   {}", fmt("last_sync"));
             println!("last daily  {}", fmt("last_daily"));
+            println!("reminders   {} (last check: {})", if cfg.reminders_enabled { "on" } else { "off" }, fmt("last_remind"));
+            if cfg.ntfy_replies {
+                println!("last text   {}", fmt("ntfy_last_in"));
+            }
             Ok(())
         }
     }
+}
+
+/// The link the ntfy Android app opens straight into "subscribe", so nothing has to be typed.
+fn app_link(cfg: &config::Config) -> String {
+    let server = cfg.ntfy_server.trim_end_matches('/');
+    match server.strip_prefix("http://") {
+        Some(host) => format!("ntfy://{host}/{}?secure=false", cfg.ntfy_topic),
+        None => format!("ntfy://{}/{}", server.trim_start_matches("https://"), cfg.ntfy_topic),
+    }
+}
+
+/// `lockin phone`: connect the phone, then wait for a text to prove it reaches LockIn.
+fn phone(cfg: &config::Config) -> Result<()> {
+    let web = format!("{}/{}", cfg.ntfy_server.trim_end_matches('/'), cfg.ntfy_topic);
+    let tail: String = cfg.ntfy_topic.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
+    println!("{}", services::qr_text(&app_link(cfg))?);
+    println!("1. Scan this with your phone's camera. It opens the ntfy app, ready to subscribe. Tap Subscribe.");
+    println!("   No app link? Open {web} in the phone's browser instead.");
+    println!("2. In the ntfy app, open the subscription whose name ends in …{tail}.");
+    println!("   If you have older LockIn subscriptions there, delete them: those topics aren't read any more.");
+    println!("Keep the code private: anyone with it can read your notifications and send commands.");
+    services::ntfy(cfg, "LockIn", &format!("This is the right topic (…{tail}). Write here to talk to LockIn. Try: hi"), false)?;
+    if !cfg.ntfy_replies {
+        println!("\nA test notification was sent. Phone replies are off, so this only gets notifications. Turn them on with: lockin replies on");
+        return Ok(());
+    }
+    if services::listener_state() != "active" {
+        println!("\n⚠ The background listener isn't running ({}). Try: lockin install", services::listener_state());
+        return Ok(());
+    }
+    let db = db::Db::open(&config::db_path())?;
+    let before = db.meta("ntfy_last_in");
+    println!("\n3. Now type hi in that subscription and send it (the arrow at the bottom). Waiting up to 3 minutes, Ctrl+C to stop…");
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(180) {
+        std::thread::sleep(Duration::from_secs(2));
+        if db.meta("ntfy_last_in") != before {
+            println!("✓ Your phone is connected. LockIn got the message and answered it.");
+            return Ok(());
+        }
+    }
+    println!("✗ Nothing arrived from your phone.");
+    println!("  • Check the subscription's name ends in …{tail}. If not, delete it and scan the code again.");
+    println!("  • In the app's settings, the default server should be {}.", cfg.ntfy_server);
+    println!("  • Or send from the browser: open {web} and use the box at the bottom.");
+    Ok(())
 }
 
 fn run_tui(cfg: config::Config) -> Result<()> {

@@ -12,6 +12,11 @@ pub enum Key {
     DailyClaude,
     SyncOnOpen,
     SyncInterval,
+    RemindOn,
+    RemindDeadlines,
+    RemindStudy,
+    RemindNudge,
+    QuietHours,
     Desktop,
     Phone,
     PhoneReplies,
@@ -57,6 +62,11 @@ pub const ROWS: &[(&str, Key)] = &[
     ("Daily briefing", Key::DailyClaude),
     ("Moodle updates", Key::SyncOnOpen),
     ("Moodle updates", Key::SyncInterval),
+    ("Reminders", Key::RemindOn),
+    ("Reminders", Key::RemindDeadlines),
+    ("Reminders", Key::RemindStudy),
+    ("Reminders", Key::RemindNudge),
+    ("Reminders", Key::QuietHours),
     ("Notifications", Key::Desktop),
     ("Notifications", Key::Phone),
     ("Notifications", Key::PhoneReplies),
@@ -89,20 +99,21 @@ pub const ROWS: &[(&str, Key)] = &[
 const SYNC_STEPS: [i64; 7] = [0, 15, 30, 60, 120, 240, 480];
 const MODELS: [&str; 3] = ["haiku", "sonnet", "opus"];
 const LANGUAGES: [&str; 3] = ["auto", "English", "Deutsch"];
+const STUDY_LEADS: [i64; 5] = [0, 5, 10, 15, 30];
 const STUDY_LENGTHS: [i64; 5] = [25, 45, 50, 60, 90];
 
 pub fn kind(key: Key) -> Kind {
     use Key::*;
     match key {
-        DailyEnabled | DailyCatchUp | DailyClaude | SyncOnOpen | Desktop | Phone | PhoneReplies | Icons | StudyAuto => Kind::Toggle,
-        DailyDays | SyncInterval | Model | TutorModel | TutorLanguage | FocusMinutes | BreakMinutes | StudyLength | StudyPerDay => Kind::Choice,
-        DailyTimes | NtfyServer | NtfyTopic | AboutMe | Vault | NewNoteDir | Editor | StudyUntil | StudyFreeFrom | StudyFreeUntil => Kind::Text,
+        DailyEnabled | DailyCatchUp | DailyClaude | SyncOnOpen | RemindOn | Desktop | Phone | PhoneReplies | Icons | StudyAuto => Kind::Toggle,
+        DailyDays | SyncInterval | Model | TutorModel | TutorLanguage | FocusMinutes | BreakMinutes | StudyLength | StudyPerDay | RemindStudy => Kind::Choice,
+        DailyTimes | NtfyServer | NtfyTopic | AboutMe | Vault | NewNoteDir | Editor | StudyUntil | StudyFreeFrom | StudyFreeUntil | RemindDeadlines | RemindNudge | QuietHours => Kind::Text,
         RunDaily | SyncNow | TestNotify | ForgetBooksPassword | EditFile | PlanNow => Kind::Action,
     }
 }
 
 pub fn touches_timer(key: Key) -> bool {
-    matches!(key, Key::DailyEnabled | Key::DailyTimes | Key::DailyDays | Key::DailyCatchUp)
+    matches!(key, Key::DailyEnabled | Key::DailyTimes | Key::DailyDays | Key::DailyCatchUp | Key::RemindOn)
 }
 
 pub fn label(key: Key) -> &'static str {
@@ -114,6 +125,11 @@ pub fn label(key: Key) -> &'static str {
         Key::DailyClaude => "Use Claude",
         Key::SyncOnOpen => "Sync when the app opens",
         Key::SyncInterval => "Sync while the app is open",
+        Key::RemindOn => "Send reminders",
+        Key::RemindDeadlines => "Warn before deadlines",
+        Key::RemindStudy => "Before study sessions",
+        Key::RemindNudge => "Study nudge and tests tomorrow",
+        Key::QuietHours => "Quiet hours",
         Key::Desktop => "Desktop",
         Key::Phone => "Phone (ntfy)",
         Key::PhoneReplies => "Text LockIn from your phone",
@@ -158,6 +174,17 @@ pub fn value(cfg: &Config, key: Key) -> String {
             m if m % 60 == 0 => format!("every {} h", m / 60),
             m => format!("every {m} min"),
         },
+        Key::RemindOn => on_off(cfg.reminders_enabled),
+        Key::RemindDeadlines if cfg.remind_deadline_hours.is_empty() => "off".into(),
+        Key::RemindDeadlines => format!("{} h before", hours_text(cfg)),
+        Key::RemindStudy => match cfg.remind_study_minutes {
+            0 => "off".into(),
+            m => format!("{m} min before"),
+        },
+        Key::RemindNudge if cfg.remind_nudge_time.is_empty() => "off".into(),
+        Key::RemindNudge => cfg.remind_nudge_time.clone(),
+        Key::QuietHours if cfg.quiet_hours.is_empty() => "off".into(),
+        Key::QuietHours => cfg.quiet_hours.replace('-', " to "),
         Key::Desktop => on_off(cfg.desktop_notifications),
         Key::Phone => on_off(cfg.ntfy_enabled),
         Key::PhoneReplies => on_off(cfg.ntfy_replies),
@@ -193,6 +220,11 @@ pub fn help(key: Key) -> &'static str {
         Key::DailyClaude => "When off, the daily job still syncs and notifies, but sends a plain list of what's due and no plan. This uses no Claude usage.",
         Key::SyncOnOpen => "Pull the latest deadlines each time you open LockIn.",
         Key::SyncInterval => "How often to pull from Moodle while LockIn stays open. This doesn't use Claude.",
+        Key::RemindOn => "Between briefings, LockIn checks every 10 minutes for deadlines coming up, study sessions about to start and tests tomorrow. It goes to your desktop and phone, uses no Claude, and sends each reminder once.",
+        Key::RemindDeadlines => "Hours before a deadline to warn you, like 24, 6, 2. If several have passed at once, you get only the closest. Type off for none.",
+        Key::RemindStudy => "A heads-up before each study session from the Week tab.",
+        Key::RemindNudge => "At this time, if you've done less than 20 minutes of focus today and something is due within a week, you get a nudge to study. Tests tomorrow are announced from this time too. Type off for neither.",
+        Key::QuietHours => "No reminders between these times, like 22:00-07:00. Deadline warnings wait until it's over. Type off to allow them any time.",
         Key::Desktop => "Show notifications on this computer through mako.",
         Key::Phone => "Push notifications to your phone through ntfy. Task titles are sent to the ntfy server.",
         Key::PhoneReplies => "Send a message to your ntfy topic to add tasks and events, tick things off, sync, or ask Claude. It works while the app is closed, if you're logged in. Anyone who knows the topic can do the same, so the first time this goes on you get a new private topic. Run lockin phone to scan it into your phone. It can't delete anything, submit to Moodle or read your files. Pressing Enter here switches it off when it's on.",
@@ -231,6 +263,11 @@ pub fn step(cfg: &mut Config, key: Key, dir: i64) {
         Key::DailyClaude => cfg.daily_use_claude = !cfg.daily_use_claude,
         Key::DailyDays => cfg.daily_weekdays_only = !cfg.daily_weekdays_only,
         Key::SyncOnOpen => cfg.sync_on_open = !cfg.sync_on_open,
+        Key::RemindOn => cfg.reminders_enabled = !cfg.reminders_enabled,
+        Key::RemindStudy => {
+            let i = STUDY_LEADS.iter().position(|m| *m == cfg.remind_study_minutes).unwrap_or(2) as i64;
+            cfg.remind_study_minutes = STUDY_LEADS[(i + dir).rem_euclid(STUDY_LEADS.len() as i64) as usize];
+        }
         Key::Desktop => cfg.desktop_notifications = !cfg.desktop_notifications,
         Key::Phone => cfg.ntfy_enabled = !cfg.ntfy_enabled,
         Key::PhoneReplies => cfg.ntfy_replies = !cfg.ntfy_replies,
@@ -263,8 +300,17 @@ pub fn step(cfg: &mut Config, key: Key, dir: i64) {
     }
 }
 
+fn hours_text(cfg: &Config) -> String {
+    cfg.remind_deadline_hours.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
+}
+
 pub fn text_value(cfg: &Config, key: Key) -> String {
-    value(cfg, key)
+    match key {
+        Key::RemindDeadlines => hours_text(cfg),
+        Key::RemindNudge => cfg.remind_nudge_time.clone(),
+        Key::QuietHours => cfg.quiet_hours.clone(),
+        _ => value(cfg, key),
+    }
 }
 
 pub fn set_text(cfg: &mut Config, key: Key, text: &str) -> Result<()> {
@@ -282,7 +328,7 @@ pub fn set_text(cfg: &mut Config, key: Key, text: &str) -> Result<()> {
             if !valid {
                 bail!("A topic can only use letters, numbers, - and _");
             }
-            cfg.ntfy_topic = text.to_string();
+            crate::config::change_topic(cfg, text.to_string());
         }
         Key::Vault => {
             let expanded = match text.strip_prefix("~/") {
@@ -311,6 +357,38 @@ pub fn set_text(cfg: &mut Config, key: Key, text: &str) -> Result<()> {
                 Key::StudyFreeFrom => cfg.study_free_day_from = time,
                 _ => cfg.study_free_day_until = time,
             }
+        }
+        Key::RemindDeadlines => {
+            let mut hours = Vec::new();
+            if !text.eq_ignore_ascii_case("off") {
+                for tok in text.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()) {
+                    match tok.trim_end_matches('h').parse::<i64>() {
+                        Ok(h) if (1..=336).contains(&h) => hours.push(h),
+                        _ => bail!("'{tok}' isn't a number of hours. Use something like 24, 6, 2"),
+                    }
+                }
+            }
+            hours.sort_unstable_by(|a, b| b.cmp(a));
+            hours.dedup();
+            cfg.remind_deadline_hours = hours;
+        }
+        Key::RemindNudge if text.is_empty() || text.eq_ignore_ascii_case("off") => cfg.remind_nudge_time.clear(),
+        Key::RemindNudge => {
+            let times = parse_times(text)?;
+            if times.len() != 1 {
+                bail!("Enter one time, like 17:00, or off");
+            }
+            cfg.remind_nudge_time = times[0].clone();
+        }
+        Key::QuietHours if text.is_empty() || text.eq_ignore_ascii_case("off") => cfg.quiet_hours.clear(),
+        Key::QuietHours => {
+            let tidy = text.replace(" to ", "-").replace(' ', "");
+            let Some((a, b)) = tidy.split_once('-') else { bail!("Use two times, like 22:00-07:00, or off") };
+            let (a, b) = (parse_times(a)?, parse_times(b)?);
+            if a.len() != 1 || b.len() != 1 || a == b {
+                bail!("Use two different times, like 22:00-07:00, or off");
+            }
+            cfg.quiet_hours = format!("{}-{}", a[0], b[0]);
         }
         Key::AboutMe => cfg.about_me = text.to_string(),
         Key::Editor => {
@@ -365,6 +443,15 @@ mod tests {
         assert!(set_text(&mut cfg, Key::NtfyTopic, "has space").is_err());
         assert!(set_text(&mut cfg, Key::Vault, "/definitely/not/here").is_err());
         assert!(set_text(&mut cfg, Key::NewNoteDir, "../out").is_err());
+        assert!(set_text(&mut cfg, Key::RemindDeadlines, "24, soon").is_err());
+        assert!(set_text(&mut cfg, Key::QuietHours, "22:00").is_err());
+        assert_eq!(cfg.remind_deadline_hours, vec![24, 6, 2]);
+        set_text(&mut cfg, Key::RemindDeadlines, "2h 48, 6 6").unwrap();
+        assert_eq!(cfg.remind_deadline_hours, vec![48, 6, 2]);
+        set_text(&mut cfg, Key::QuietHours, "23:00 to 6:30").unwrap();
+        assert_eq!(cfg.quiet_hours, "23:00-06:30");
+        set_text(&mut cfg, Key::RemindNudge, "off").unwrap();
+        assert_eq!(value(&cfg, Key::RemindNudge), "off");
         set_text(&mut cfg, Key::DailyTimes, "16:30, 7:00").unwrap();
         assert_eq!(cfg.daily_times, vec!["07:00", "16:30"]);
     }
