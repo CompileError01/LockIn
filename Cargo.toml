@@ -1,0 +1,22 @@
+[package]
+name = "lockin"
+version = "0.1.0"
+edition = "2021"
+description = "Neovim-style terminal organizer with Moodle sync and a daily Claude briefing"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+unicode-width = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

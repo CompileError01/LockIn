@@ -16,7 +16,8 @@ setup. Run it again to update, which keeps your settings and data. `./install.sh
 the program and keeps your data. To send LockIn to someone, run `./package.sh` and send them
 `lockin.tar.gz`.
 
-You'll need a Moodle account. A Claude account is optional: without one, LockIn sends a plain list of
+You'll need a Moodle account and the `moodle` terminal client, which LockIn uses to reach Moodle. It
+isn't part of this repo, so put it at `~/.local/bin/moodle`. A Claude account is optional: without one, LockIn sends a plain list of
 what's due instead of a plan.
 
 ## Commands

@@ -1,0 +1,19 @@
+# Build output
+target/
+lockin.tar.gz
+
+# Not published: third-party script, kept local until sharing it is confirmed
+vendor/
+
+# Secrets and personal data must never be uploaded
+.env
+.env.*
+*.pem
+*.key
+*.p12
+id_rsa*
+id_ed25519*
+/config.toml
+*.db
+*.db-shm
+*.db-wal
