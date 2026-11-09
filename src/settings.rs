@@ -166,7 +166,7 @@ pub fn help(key: Key) -> &'static str {
         Key::SyncInterval => "How often to pull from Moodle while LockIn stays open. This doesn't use Claude.",
         Key::Desktop => "Show notifications on this computer through mako.",
         Key::Phone => "Push notifications to your phone through ntfy. Task titles are sent to the ntfy server.",
-        Key::PhoneReplies => "Send a message to your ntfy topic to add tasks and events, tick things off, sync, or ask Claude. It works while the app is closed, if you're logged in. Anyone who knows the topic can do the same, so the first time this goes on you get a new private topic to subscribe to. It can't delete anything, submit to Moodle or read your files.",
+        Key::PhoneReplies => "Send a message to your ntfy topic to add tasks and events, tick things off, sync, or ask Claude. It works while the app is closed, if you're logged in. Anyone who knows the topic can do the same, so the first time this goes on you get a new private topic. Run lockin phone to scan it into your phone. It can't delete anything, submit to Moodle or read your files. Pressing Enter here switches it off when it's on.",
         Key::NtfyServer => "The server that delivers phone notifications. Change it only if you host your own.",
         Key::NtfyTopic => "Subscribe to this name in the ntfy app. Anyone who knows it can read your notifications, so keep it private.",
         Key::Model => "The Claude model for the briefing and the Claude tab. Haiku uses the least of your usage, and Opus uses the most.",

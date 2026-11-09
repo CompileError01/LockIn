@@ -1952,9 +1952,18 @@ impl App {
         true
     }
 
+    /// Another window or a command may have changed the settings since this window read them, and
+    /// saving what's in memory would undo that.
+    fn reread_settings(&mut self) {
+        if let Ok(cfg) = crate::config::load() {
+            self.cfg = cfg;
+        }
+    }
+
     fn step_setting(&mut self, dir: i64) {
         let key = self.current_setting();
         if matches!(settings::kind(key), Kind::Toggle | Kind::Choice) {
+            self.reread_settings();
             settings::step(&mut self.cfg, key, dir);
             self.commit_setting(key);
         }
@@ -1990,6 +1999,7 @@ impl App {
     }
 
     fn set_setting_text(&mut self, key: settings::Key, text: &str) -> Result<()> {
+        self.reread_settings();
         settings::set_text(&mut self.cfg, key, text)?;
         self.commit_setting(key);
         Ok(())
@@ -2019,7 +2029,9 @@ impl App {
             self.scan_notes();
         }
         match result {
-            Ok(()) if new_topic => self.info("Replies on, with a new private topic. Subscribe to the topic shown below in the ntfy app"),
+            Ok(()) if new_topic => self.info("Replies on, with a new private topic. Run lockin phone to scan it into your phone"),
+            Ok(()) if key == settings::Key::PhoneReplies && !self.cfg.ntfy_replies => self.error("Phone replies are now OFF. LockIn won't answer texts until you switch this back on"),
+            Ok(()) if key == settings::Key::PhoneReplies => self.info("Phone replies are on. Run lockin phone to connect your phone"),
             Ok(()) => self.info(format!("{}: {}", settings::label(key), settings::value(&self.cfg, key))),
             Err(e) => self.error(format!("Saved, but the schedule wasn't updated: {e}")),
         }

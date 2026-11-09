@@ -2237,6 +2237,20 @@ mod tests {
         press(&mut app, "\n");
         assert_eq!(app.cfg.ntfy_topic, second_topic, "switching back on keeps your subscription working");
         assert_eq!(crate::config::load().unwrap().ntfy_topic, second_topic, "and it's saved");
+        // A window holding old settings must not undo a change made elsewhere.
+        let mut elsewhere = crate::config::load().unwrap();
+        elsewhere.ntfy_replies = false;
+        elsewhere.focus_minutes = 99;
+        crate::config::save(&elsewhere).unwrap();
+        assert!(app.cfg.ntfy_replies, "this window still holds the old value");
+        press(&mut app, "\n");
+        assert!(app.cfg.ntfy_replies, "the toggle starts from what's on disk, so off becomes on");
+        assert_eq!(app.cfg.focus_minutes, 99, "and the other change survives");
+        assert_eq!(crate::config::load().unwrap().focus_minutes, 99);
+        assert_eq!(app.msg_kind, MsgKind::Info);
+        press(&mut app, "\n");
+        assert_eq!(app.msg_kind, MsgKind::Error, "switching off is loud");
+        assert!(app.msg.contains("OFF"));
 
         // Quitting during a focus session asks first.
         press(&mut app, ":q\n");

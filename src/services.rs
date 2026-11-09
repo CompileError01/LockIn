@@ -78,6 +78,44 @@ pub fn set_replies(cfg: &mut Config, on: bool) -> Result<bool> {
     Ok(changed)
 }
 
+/// Whether the background listener is running, in systemd's words.
+pub fn listener_state() -> String {
+    if crate::config::is_sandboxed() {
+        return "not available in a sandbox".into();
+    }
+    let out = Command::new("systemctl").args(["--user", "is-active", "lockin-listen.service"]).stdin(Stdio::null()).output();
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        Err(_) => "unknown".into(),
+    }
+}
+
+/// A QR code for the terminal. Scanning it opens the topic, ready to subscribe and send from.
+pub fn qr_text(link: &str) -> Result<String> {
+    let code = qrcode::QrCode::new(link.as_bytes()).context("couldn't make a QR code")?;
+    let width = code.width();
+    let dark = |x: isize, y: isize| -> bool {
+        x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < width && code[(x as usize, y as usize)] == qrcode::Color::Dark
+    };
+    // Two rows of modules fit in one line of text, and two blank rows and columns frame the code.
+    let mut out = String::new();
+    let (quiet, size) = (2isize, width as isize);
+    let mut y = -quiet;
+    while y < size + quiet {
+        for x in -quiet..size + quiet {
+            out.push(match (dark(x, y), dark(x, y + 1)) {
+                (false, false) => '█',
+                (true, false) => '▄',
+                (false, true) => '▀',
+                (true, true) => ' ',
+            });
+        }
+        out.push('\n');
+        y += 2;
+    }
+    Ok(out)
+}
+
 /// Writes and starts the background listener, or stops it. The unit holds no secrets.
 pub fn apply_listener(cfg: &Config) -> Result<()> {
     if crate::config::is_sandboxed() {
@@ -509,6 +547,18 @@ mod tests {
         let unit = timer_unit(&cfg);
         assert!(unit.contains("OnCalendar=Mon..Fri *-*-* 07:30:00"), "{unit}");
         assert!(unit.contains("Persistent=false"));
+    }
+
+    #[test]
+    fn qr_codes_are_square_and_framed() {
+        let text = qr_text("https://ntfy.sh/lockin-0123456789abcdef0123456789abcdef").unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let width = lines[0].chars().count();
+        assert!(width >= 25, "{width}");
+        assert!(lines.iter().all(|l| l.chars().count() == width));
+        // Each line holds two rows of modules, so the code is as tall as it is wide.
+        assert!((lines.len() * 2).abs_diff(width) <= 1);
+        assert!(lines[0].chars().all(|c| c == '█'), "a light border, which scanners need");
     }
 
     #[test]

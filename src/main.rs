@@ -50,6 +50,8 @@ enum Cmd {
     BooksDebug,
     /// Turn texting LockIn from your phone on or off
     Replies { state: String },
+    /// Show a QR code that connects your phone to your private topic
+    Phone,
     /// Internal: the background service for phone replies
     #[command(hide = true)]
     Listen,
@@ -131,6 +133,18 @@ fn main() -> Result<()> {
         Some(Cmd::BooksHelper { .. }) => unreachable!("handled above"),
         Some(Cmd::BooksDebug) => books::debug(&cfg.digi4school_email),
         Some(Cmd::Listen) => replies::listen(&cfg),
+        Some(Cmd::Phone) => {
+            let link = format!("{}/{}", cfg.ntfy_server.trim_end_matches('/'), cfg.ntfy_topic);
+            println!("{}", services::qr_text(&link)?);
+            println!("Scan this, then subscribe to the topic in the ntfy app or on that page.");
+            println!("Keep it private: anyone with this code can read your replies and send commands.");
+            if !cfg.ntfy_replies {
+                println!("\nPhone replies are off, so you only get notifications. Turn them on with: lockin replies on");
+            }
+            services::ntfy(&cfg, "LockIn", "This is the right topic. Write here to talk to LockIn. Try: help", false)?;
+            println!("\nA test message was just sent. If it shows up on your phone, you're on the right topic.");
+            Ok(())
+        }
         Some(Cmd::Replies { state }) => {
             let mut cfg = cfg;
             let on = match state.as_str() {
@@ -141,7 +155,7 @@ fn main() -> Result<()> {
             let changed = services::set_replies(&mut cfg, on)?;
             println!("Phone replies are {}.", if on { "on" } else { "off" });
             if changed {
-                println!("You have a new private topic. Run lockin status to see it, and subscribe to it in the ntfy app.");
+                println!("You have a new private topic. Run lockin phone to scan it into your phone.");
             }
             Ok(())
         }
@@ -167,7 +181,7 @@ fn main() -> Result<()> {
             println!("database    {}", config::db_path().display());
             println!("vault       {}", cfg.vault);
             println!("phone topic {}/{}", cfg.ntfy_server, cfg.ntfy_topic);
-            println!("replies     {}", if cfg.ntfy_replies { "on" } else { "off" });
+            println!("replies     {} (listener: {})", if cfg.ntfy_replies { "on" } else { "off" }, services::listener_state());
             println!("last sync   {}", fmt("last_sync"));
             println!("last daily  {}", fmt("last_daily"));
             Ok(())

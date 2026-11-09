@@ -11,6 +11,7 @@ chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 digi_download_core = { path = "crates/digi_download_core" }
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+qrcode = { version = "0.14", default-features = false }
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

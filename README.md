@@ -32,6 +32,8 @@ lockin add "Read chapter 4 @fri 18:00 !! #AM ~45m"
 lockin pdf FILE   read a PDF in the terminal
 lockin teach FILE "question"   ask a teaching chat about a file
 lockin notify     send a test notification
+lockin phone      QR code that connects your phone
+lockin replies on|off   text LockIn from your phone
 lockin status     show paths, phone topic and last run times
 lockin install    apply your settings to the daily systemd timer
 ```
@@ -137,9 +139,9 @@ start off, and you can turn them on in the Settings tab.
 
 ### Texting LockIn back
 
-Run `lockin replies on`, or use the Settings tab. The first time, you get a new private topic, so
-subscribe to the one `lockin status` prints. Then send a message to that topic from the ntfy app or
-[its web app](https://ntfy.sh/app):
+Run `lockin replies on`, or use the Settings tab. The first time, you get a new private topic. Run
+`lockin phone` and scan the QR code to connect your phone: it also sends a test message, so you can see
+you're on the right topic. Then send a message to that topic from the ntfy app or the page the code opens:
 
 ```
 remind me to call mum tomorrow at 5     Claude works out what you mean
