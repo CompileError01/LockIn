@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS tutor_sessions(
   id INTEGER PRIMARY KEY, source TEXT NOT NULL UNIQUE, course TEXT NOT NULL, title TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '', docs TEXT NOT NULL DEFAULT '[]', claude_session TEXT,
   sent_pages TEXT NOT NULL DEFAULT '[]', notes_digest TEXT NOT NULL DEFAULT '', cmid INTEGER,
-  pulled INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL);
+  pulled INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, teach INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS tutor_messages(
   id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, role INTEGER NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
 ";
@@ -207,6 +207,20 @@ pub struct Db {
     pub c: Connection,
 }
 
+/// Lessons from before teach mode existed keep teaching, and plain chats stay plain.
+fn migrate(c: &Connection) -> Result<()> {
+    let has_teach: i64 = c.query_row("SELECT count(*) FROM pragma_table_info('tutor_sessions') WHERE name='teach'", [], |r| r.get(0))?;
+    if has_teach == 0 {
+        c.execute_batch(
+            "BEGIN;
+             ALTER TABLE tutor_sessions ADD COLUMN teach INTEGER NOT NULL DEFAULT 0;
+             UPDATE tutor_sessions SET teach=1 WHERE source NOT LIKE 'chat:%';
+             COMMIT;",
+        )?;
+    }
+    Ok(())
+}
+
 impl Db {
     pub fn open(path: &Path) -> Result<Db> {
         let c = Connection::open(path)?;
@@ -214,6 +228,7 @@ impl Db {
         c.pragma_update(None, "journal_mode", "WAL")?;
         c.pragma_update(None, "foreign_keys", "ON")?;
         c.execute_batch(SCHEMA)?;
+        migrate(&c)?;
         Ok(Db { c })
     }
 
@@ -587,6 +602,31 @@ mod tests {
         assert_eq!(d.task(a).unwrap().unwrap().priority, 1);
         let free = d.task(b).unwrap().unwrap();
         assert_eq!((free.priority, free.effort_min, free.ai_note.as_str()), (3, Some(30), "n"));
+    }
+
+    #[test]
+    fn old_lessons_become_teaching_chats_when_the_database_upgrades() {
+        let path = std::env::temp_dir().join(format!("lockin-migrate-{}.db", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        {
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE tutor_sessions(id INTEGER PRIMARY KEY, source TEXT NOT NULL UNIQUE, course TEXT NOT NULL, title TEXT NOT NULL,
+                 description TEXT NOT NULL DEFAULT '', docs TEXT NOT NULL DEFAULT '[]', claude_session TEXT, sent_pages TEXT NOT NULL DEFAULT '[]',
+                 notes_digest TEXT NOT NULL DEFAULT '', cmid INTEGER, pulled INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL);
+                 INSERT INTO tutor_sessions(source,course,title,updated_at) VALUES('task:event:1','AM','Lesson',1),('chat:2','','Chat',2);",
+            )
+            .unwrap();
+        }
+        for _ in 0..2 {
+            // Opening twice shows the upgrade only happens once and keeps the data.
+            let db = Db::open(&path).unwrap();
+            let flags: Vec<(String, bool)> = db.c.prepare("SELECT title,teach FROM tutor_sessions ORDER BY id").unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect();
+            assert_eq!(flags, vec![("Lesson".to_string(), true), ("Chat".to_string(), false)]);
+        }
+        for ext in ["", "-wal", "-shm"] {
+            std::fs::remove_file(format!("{}{ext}", path.display())).ok();
+        }
     }
 
     #[test]

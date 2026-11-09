@@ -5,7 +5,7 @@ use crate::files::{self, Browser, Entry, Preview, Sort, Yank};
 use crate::form::{self, Form, Target};
 use crate::services;
 use crate::settings::{self, Kind};
-use crate::tutor::{self, Course, Material, Note, Role};
+use crate::tutor;
 use crate::timeutil::{date_of, now_ts, parse_quick, parse_when, today, ts_of};
 use anyhow::{bail, Result};
 use chrono::{Datelike, Duration, Local, Months, NaiveDate, NaiveTime};
@@ -24,12 +24,11 @@ pub enum View {
     Grades,
     Focus,
     Claude,
-    Tutor,
     Chats,
     Settings,
 }
 
-pub const VIEWS: [(View, &str); 11] = [
+pub const VIEWS: [(View, &str); 10] = [
     (View::Today, "Today"),
     (View::Tasks, "Tasks"),
     (View::Calendar, "Calendar"),
@@ -38,7 +37,6 @@ pub const VIEWS: [(View, &str); 11] = [
     (View::Grades, "Grades"),
     (View::Focus, "Focus"),
     (View::Claude, "Claude"),
-    (View::Tutor, "Tutor"),
     (View::Chats, "Chats"),
     (View::Settings, "Settings"),
 ];
@@ -55,7 +53,6 @@ pub enum Prompt {
     VaultFind,
     NewHabit,
     Chat,
-    TutorAsk,
     ChatTitle(Option<i64>),
     ChatAsk,
     BooksEmail,
@@ -82,14 +79,6 @@ pub enum Mode {
     Input(Prompt),
     Confirm(Confirm),
     Form,
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum TutorLevel {
-    Courses,
-    Materials,
-    Lesson,
-    Notes,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -127,9 +116,8 @@ pub(crate) enum Bg {
     Sync(Result<String, String>),
     Brief(Result<String, String>),
     Chat(Result<String, String>),
-    Tutor(Result<(), String>),
-    TutorPull(Result<String, String>),
-    Chats(Result<(), String>),
+    CoursePull(Result<String, String>),
+    Chats(i64, Result<(), String>),
     Book(serde_json::Value),
 }
 
@@ -233,23 +221,6 @@ pub struct App {
     preview_path: Option<PathBuf>,
     pub form: Option<Form>,
     pub chats: ChatsState,
-    pub tutor_level: TutorLevel,
-    pub tutor_courses: Vec<Course>,
-    pub tutor_course: usize,
-    pub tutor_materials: Vec<Material>,
-    pub tutor_material: usize,
-    pub tutor_session: Option<i64>,
-    pub tutor_title: String,
-    pub tutor_subject: String,
-    pub tutor_docs: Vec<PathBuf>,
-    pub tutor_chat: Vec<(Role, String)>,
-    pub tutor_scroll: u16,
-    pub tutor_busy: bool,
-    pub tutor_pulling: bool,
-    pub tutor_notes: Vec<Note>,
-    pub tutor_note: usize,
-    pub tutor_preview: Preview,
-    tutor_preview_path: Option<PathBuf>,
     pub sel_settings: usize,
     pub timer_next: String,
     last_sync_try: Instant,
@@ -272,7 +243,7 @@ pub struct App {
 }
 
 const COMMANDS: &[&str] = &[
-    "add", "brief", "books", "calendar", "chats", "claude", "config", "daily", "event", "filter", "focus", "grades", "habit", "habits", "help", "moodle", "note",
+    "add", "brief", "books", "calendar", "chats", "claude", "config", "daily", "event", "filter", "focus", "grades", "habit", "habits", "help", "learn", "moodle", "note",
     "notes", "notify", "pdf", "q", "qa", "settings", "stop", "sync", "tasks", "today", "w", "wq",
 ];
 
@@ -344,23 +315,6 @@ impl App {
             preview_path: None,
             form: None,
             chats: ChatsState::default(),
-            tutor_level: TutorLevel::Courses,
-            tutor_courses: vec![],
-            tutor_course: 0,
-            tutor_materials: vec![],
-            tutor_material: 0,
-            tutor_session: None,
-            tutor_title: String::new(),
-            tutor_subject: String::new(),
-            tutor_docs: vec![],
-            tutor_chat: vec![],
-            tutor_scroll: 0,
-            tutor_busy: false,
-            tutor_pulling: false,
-            tutor_notes: vec![],
-            tutor_note: 0,
-            tutor_preview: Preview::None,
-            tutor_preview_path: None,
             sel_settings: 0,
             timer_next: String::new(),
             last_sync_try: Instant::now(),
@@ -394,7 +348,6 @@ impl App {
         self.focus_today = self.db.focus_minutes_today()?;
         self.last_sync = self.db.meta("last_sync").and_then(|v| v.parse().ok());
         self.last_version = self.db.data_version();
-        self.reload_tutor();
         self.reload_chats();
         self.clamp();
         Ok(())
@@ -522,12 +475,6 @@ impl App {
             View::Grades => self.visible_grades().len(),
             View::Settings => settings::ROWS.len(),
             View::Chats => self.chats_len(),
-            View::Tutor => match self.tutor_level {
-                TutorLevel::Courses => self.tutor_courses.len(),
-                TutorLevel::Materials => self.tutor_materials.len(),
-                TutorLevel::Notes => self.tutor_notes.len(),
-                TutorLevel::Lesson => 0,
-            },
             View::Calendar | View::Focus | View::Claude => 0,
         }
     }
@@ -541,12 +488,6 @@ impl App {
             View::Grades => Some(&mut self.sel_grades),
             View::Settings => Some(&mut self.sel_settings),
             View::Chats => self.chats_sel_mut(),
-            View::Tutor => match self.tutor_level {
-                TutorLevel::Courses => Some(&mut self.tutor_course),
-                TutorLevel::Materials => Some(&mut self.tutor_material),
-                TutorLevel::Notes => Some(&mut self.tutor_note),
-                TutorLevel::Lesson => None,
-            },
             View::Calendar | View::Focus | View::Claude => None,
         }
     }
@@ -559,9 +500,6 @@ impl App {
         self.sel_habits = self.sel_habits.min(last(self.habits.len()));
         self.sel_grades = self.sel_grades.min(last(self.visible_grades().len()));
         self.sel_agenda = self.sel_agenda.min(last(self.agenda(self.cal_date).len()));
-        self.tutor_course = self.tutor_course.min(last(self.tutor_courses.len()));
-        self.tutor_material = self.tutor_material.min(last(self.tutor_materials.len()));
-        self.tutor_note = self.tutor_note.min(last(self.tutor_notes.len()));
         self.clamp_chats();
     }
 
@@ -587,18 +525,6 @@ impl App {
     pub fn prepare(&mut self) {
         if self.view == View::Chats {
             return self.prepare_chats();
-        }
-        if self.view == View::Tutor {
-            let target = match (self.tutor_level, self.tutor_materials.get(self.tutor_material)) {
-                (TutorLevel::Materials, Some(Material::File { path, rel })) => Some(Entry { name: rel.clone(), path: path.clone(), is_dir: false, size: 0, modified: 0 }),
-                _ => None,
-            };
-            let path = target.as_ref().map(|e| e.path.clone());
-            if path != self.tutor_preview_path {
-                self.tutor_preview = files::preview(target.as_ref(), false, Sort::Name);
-                self.tutor_preview_path = path;
-            }
-            return;
         }
         if self.view != View::Notes {
             return;
@@ -643,25 +569,19 @@ impl App {
                     Err(e) => self.error(e),
                 }
             }
-            Bg::Tutor(r) => {
-                self.tutor_busy = false;
-                self.tutor_scroll = 0;
-                match r {
-                    Ok(()) if self.view != View::Tutor => self.info("Your tutor answered. Open the Tutor tab to read it"),
-                    Ok(()) => {}
-                    Err(e) => self.error(format!("Tutor: {e}")),
-                }
-            }
-            Bg::TutorPull(r) => {
-                self.tutor_pulling = false;
+            Bg::CoursePull(r) => {
+                self.chats.pulling = false;
                 match r {
                     Ok(m) => self.info(m),
                     Err(e) => self.error(e),
                 }
+                self.refresh_course_lists();
             }
-            Bg::Chats(r) => {
-                self.chats.busy = false;
-                self.chats.scroll = 0;
+            Bg::Chats(id, r) => {
+                self.chats.busy.remove(&id);
+                if self.chats.session == Some(id) {
+                    self.chats.scroll = 0;
+                }
                 match r {
                     Ok(()) if self.view != View::Chats => self.info("Claude answered in your chat"),
                     Ok(()) => {}
@@ -850,7 +770,7 @@ impl App {
                 self.info("Note deleted. Press u to undo");
             }
             Confirm::RestartLesson(index) => {
-                self.tutor_material = index;
+                self.chats.material = index;
                 self.start_lesson(true);
             }
             Confirm::TrashNote(path) => {
@@ -1030,8 +950,7 @@ impl App {
             Prompt::BooksEmail if text.is_empty() => Ok(()),
             Prompt::BooksEmail => self.set_books_email(&text),
             Prompt::BooksPassword => Ok(()),
-            Prompt::TutorAsk if text.is_empty() => Ok(()),
-            Prompt::TutorAsk => self.ask_tutor(text),
+
             _ if text.is_empty() && !matches!(prompt, Prompt::SetDue(_) | Prompt::Setting(settings::Key::AboutMe)) => Ok(()),
             Prompt::NewTask(day) => self.add_task(&text, day),
             Prompt::EditTitle(id) => self.edit_title(id, &text),
@@ -1299,8 +1218,8 @@ impl App {
                 self.switch(View::Chats);
                 self.on_chats_key('B', 1);
             }
-            "tutor" if arg.is_empty() => self.switch(View::Tutor),
-            "tutor" => {
+            "learn" | "tutor" if arg.is_empty() => self.open_courses(),
+            "learn" | "tutor" => {
                 let path = match arg.strip_prefix("~/") {
                     Some(rest) => crate::config::home().join(rest),
                     None => PathBuf::from(arg),
@@ -1364,14 +1283,13 @@ impl App {
         }
     }
 
-    fn switch(&mut self, view: View) {
+    pub(crate) fn switch(&mut self, view: View) {
         self.view = view;
         self.search.clear();
         self.preview_scroll = 0;
         match view {
             View::Notes => self.scan_notes(),
             View::Settings => self.timer_next = services::timer_next_run(),
-            View::Tutor => self.refresh_tutor_lists(),
             View::Chats => self.reload_chats(),
             _ => {}
         }
@@ -1427,12 +1345,6 @@ impl App {
         if self.view == View::Chats && c == 'd' {
             return self.chats_delete();
         }
-        if self.view == View::Tutor && c == 'd' && self.tutor_level == TutorLevel::Notes {
-            if let Some(n) = self.tutor_notes.get(self.tutor_note) {
-                self.mode = Mode::Confirm(Confirm::DeleteTutorNote(n.path.clone()));
-            }
-            return;
-        }
         match c {
             ':' => self.open_prompt(Prompt::Command, ""),
             '/' => self.open_prompt(Prompt::Search, ""),
@@ -1453,8 +1365,6 @@ impl App {
                 if !self.search.is_empty() {
                     self.search.clear();
                     self.clamp();
-                } else if self.view == View::Tutor {
-                    self.tutor_back();
                 } else if self.view == View::Chats {
                     self.chats_back();
                 }
@@ -1486,10 +1396,6 @@ impl App {
             View::Chats if self.chats.level == ChatLevel::Chat => {
                 self.chats.scroll = if dir > 0 { self.chats.scroll.saturating_sub(10) } else { self.chats.scroll.saturating_add(10) }
             }
-            View::Tutor if self.tutor_level == TutorLevel::Lesson => {
-                self.tutor_scroll = if dir > 0 { self.tutor_scroll.saturating_sub(10) } else { self.tutor_scroll.saturating_add(10) }
-            }
-            View::Calendar => self.month_step(dir as i32),
             _ => self.move_sel(10 * dir),
         }
     }
@@ -1498,7 +1404,6 @@ impl App {
         match (prefix, c) {
             ('g', 'g') => match self.view {
                 View::Claude => self.chat_scroll = u16::MAX,
-                View::Tutor if self.tutor_level == TutorLevel::Lesson => self.tutor_scroll = u16::MAX,
                 View::Chats if self.chats.level == ChatLevel::Chat => self.chats.scroll = u16::MAX,
                 _ => self.set_sel(n.map_or(0, |v| v.saturating_sub(1))),
             },
@@ -1540,7 +1445,7 @@ impl App {
                 self.find_sel = 0;
                 self.open_prompt(Prompt::VaultFind, "");
             }
-            (' ', 'l') => self.switch(View::Tutor),
+            (' ', 'l') => self.open_courses(),
             (' ', 'C') => self.switch(View::Chats),
             (' ', 'm') => self.want_editor = Some(EditTarget::MoodleApp),
             (' ', ',') => self.switch(View::Settings),
@@ -1583,7 +1488,6 @@ impl App {
                 }
             }
             View::Notes => self.open_entry(),
-            View::Tutor => self.tutor_enter(),
             View::Chats => self.chats_enter(),
             View::Settings => self.activate_setting(),
             View::Claude => self.open_prompt(Prompt::Chat, ""),
@@ -1603,11 +1507,6 @@ impl App {
             }
             View::Settings => {
                 if self.on_settings_key(c) {
-                    return;
-                }
-            }
-            View::Tutor => {
-                if self.on_tutor_key(c, times) {
                     return;
                 }
             }
@@ -2035,219 +1934,6 @@ impl App {
             _ => return false,
         }
         true
-    }
-
-    // ---- tutor ------------------------------------------------------------
-
-    fn current_course(&self) -> Option<&Course> {
-        self.tutor_courses.get(self.tutor_course)
-    }
-
-    /// Rereads the course and material lists, which come from the database and disk.
-    pub fn refresh_tutor_lists(&mut self) {
-        self.tutor_courses = tutor::courses(&self.db);
-        self.tutor_materials = self.current_course().map(|c| tutor::materials(c, &self.tasks)).unwrap_or_default();
-        self.tutor_preview_path = None;
-        self.clamp();
-    }
-
-    /// Rereads the open lesson and its notes, so background answers appear on their own.
-    fn reload_tutor(&mut self) {
-        if let Some(id) = self.tutor_session {
-            if let Ok(chat) = tutor::messages(&self.db, id) {
-                self.tutor_chat = chat;
-            }
-            if let Ok(s) = tutor::session(&self.db, id) {
-                self.tutor_docs = s.docs;
-            }
-        }
-        if !self.tutor_subject.is_empty() {
-            self.tutor_notes = tutor::load_notes(&self.tutor_subject);
-        }
-    }
-
-    fn tutor_enter(&mut self) {
-        match self.tutor_level {
-            TutorLevel::Courses => {
-                self.tutor_material = 0;
-                self.refresh_tutor_lists();
-                if let Some(course) = self.current_course() {
-                    self.tutor_subject = tutor::subject_of(&course.shortname);
-                    self.tutor_level = TutorLevel::Materials;
-                    self.reload_tutor();
-                } else {
-                    self.info("No courses yet. Press gs to sync Moodle");
-                }
-            }
-            TutorLevel::Materials => self.start_lesson(false),
-            TutorLevel::Lesson => self.open_prompt(Prompt::TutorAsk, ""),
-            TutorLevel::Notes => {
-                if let Some(n) = self.tutor_notes.get(self.tutor_note) {
-                    self.want_editor = Some(EditTarget::Note(n.path.clone()));
-                }
-            }
-        }
-    }
-
-    fn tutor_back(&mut self) {
-        self.tutor_level = match self.tutor_level {
-            TutorLevel::Courses | TutorLevel::Materials => TutorLevel::Courses,
-            TutorLevel::Lesson => TutorLevel::Materials,
-            TutorLevel::Notes if self.tutor_session.is_some() => TutorLevel::Lesson,
-            TutorLevel::Notes => TutorLevel::Materials,
-        };
-        if self.tutor_level == TutorLevel::Materials {
-            self.tutor_session = None;
-            self.tutor_chat.clear();
-            self.refresh_tutor_lists();
-        }
-    }
-
-    fn on_tutor_key(&mut self, c: char, times: isize) -> bool {
-        let lesson = self.tutor_level == TutorLevel::Lesson;
-        match c {
-            'h' => self.tutor_back(),
-            'l' if !lesson => self.tutor_enter(),
-            'j' if lesson => self.tutor_scroll = self.tutor_scroll.saturating_sub(times.max(1) as u16),
-            'k' if lesson => self.tutor_scroll = self.tutor_scroll.saturating_add(times.max(1) as u16),
-            'G' if lesson => self.tutor_scroll = 0,
-            'i' | 'a' | 'o' if lesson => self.open_prompt(Prompt::TutorAsk, ""),
-            'n' if lesson || self.tutor_level == TutorLevel::Materials => {
-                self.tutor_note = 0;
-                self.reload_tutor();
-                self.tutor_level = TutorLevel::Notes;
-            }
-            's' if matches!(self.tutor_level, TutorLevel::Courses | TutorLevel::Materials) => self.pull_course(),
-            'v' => self.view_tutor_document(),
-            'N' if self.tutor_level == TutorLevel::Materials => {
-                let index = self.tutor_material;
-                let has_lesson = self.tutor_materials.get(index).and_then(|m| tutor::find_session(&self.db, &m.source_key()).ok().flatten()).is_some();
-                if has_lesson {
-                    self.mode = Mode::Confirm(Confirm::RestartLesson(index));
-                } else {
-                    self.start_lesson(false);
-                }
-            }
-            _ => return false,
-        }
-        true
-    }
-
-    fn pull_course(&mut self) {
-        if self.tutor_pulling {
-            return self.info("Already downloading");
-        }
-        let Some(course) = self.current_course().cloned() else {
-            return self.info("No courses yet. Press gs to sync Moodle");
-        };
-        self.tutor_pulling = true;
-        self.info(format!("Downloading files for {}…", course.shortname));
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let r = tutor::pull(&course.shortname, None).map(|v| format!("{}: {} new file(s)", course.shortname, v["got"].as_i64().unwrap_or(0)));
-            let _ = tx.send(Bg::TutorPull(r.map_err(|e| e.to_string())));
-        });
-    }
-
-    fn view_tutor_document(&mut self) {
-        let path = match self.tutor_level {
-            TutorLevel::Materials => match self.tutor_materials.get(self.tutor_material) {
-                Some(Material::File { path, .. }) => Some(path.clone()),
-                _ => None,
-            },
-            _ => self.tutor_docs.first().cloned(),
-        };
-        match path {
-            Some(p) if crate::pdf::is_pdf(&p) => self.want_editor = Some(EditTarget::Pdf(p)),
-            Some(p) => self.want_editor = Some(EditTarget::Note(p)),
-            None => self.info("This has no file to open"),
-        }
-    }
-
-    /// Opens the selected material's saved lesson, or starts one. `restart` wipes the old one.
-    fn start_lesson(&mut self, restart: bool) {
-        let Some(material) = self.tutor_materials.get(self.tutor_material).cloned() else {
-            return self.info("Nothing here yet. Press s to download this course's files");
-        };
-        let course = self.current_course().map(|c| c.shortname.clone()).unwrap_or_default();
-        let r = self.open_material(&course, &material, restart);
-        self.attempt(r);
-    }
-
-    fn open_material(&mut self, course: &str, material: &Material, restart: bool) -> Result<()> {
-        let existing = tutor::find_session(&self.db, &material.source_key())?;
-        let (id, is_new) = match existing {
-            Some(s) if restart => {
-                tutor::delete_session(&self.db, s.id)?;
-                (tutor::create_session(&self.db, course, material)?, true)
-            }
-            Some(s) => (s.id, tutor::messages(&self.db, s.id)?.is_empty()),
-            None => (tutor::create_session(&self.db, course, material)?, true),
-        };
-        self.tutor_session = Some(id);
-        self.tutor_title = material.title().to_string();
-        self.tutor_subject = tutor::subject_of(course);
-        self.tutor_level = TutorLevel::Lesson;
-        self.tutor_scroll = 0;
-        self.reload_tutor();
-        if is_new {
-            self.spawn_teach(id, tutor::OPENER.to_string());
-        }
-        Ok(())
-    }
-
-    fn ask_tutor(&mut self, text: String) -> Result<()> {
-        let Some(id) = self.tutor_session else { return Ok(()) };
-        if self.tutor_busy {
-            bail!("Your tutor is still answering");
-        }
-        tutor::add_message(&self.db, id, Role::You, &text)?;
-        self.tutor_scroll = 0;
-        self.spawn_teach(id, text);
-        Ok(())
-    }
-
-    fn spawn_teach(&mut self, id: i64, text: String) {
-        self.tutor_busy = true;
-        // Tests drive the UI, and must never start a real (and billed) Claude request.
-        if cfg!(test) {
-            return;
-        }
-        let (tx, cfg) = (self.tx.clone(), self.cfg.clone());
-        std::thread::spawn(move || {
-            let r = (|| -> Result<()> {
-                let db = Db::open(&db_path())?;
-                tutor::teach(&db, &cfg, id, &text)
-            })();
-            let _ = tx.send(Bg::Tutor(r.map_err(|e| e.to_string())));
-        });
-    }
-
-    fn teach_current_task(&mut self) {
-        let Some(t) = self.current_task() else { return };
-        if !t.is_moodle() {
-            return self.info("The tutor works from Moodle tasks and files");
-        }
-        let ext = t.ext_id.clone().unwrap_or_else(|| t.id.to_string());
-        let material = Material::Task { source: ext, title: t.title.clone(), description: t.notes.clone(), due: t.due, cmid: assignment_id(&t.url) };
-        self.switch(View::Tutor);
-        if let Some(i) = self.tutor_courses.iter().position(|c| c.shortname == t.course) {
-            self.tutor_course = i;
-            self.refresh_tutor_lists();
-        }
-        let r = self.open_material(&t.course, &material, false);
-        self.attempt(r);
-    }
-
-    /// Teaches from one file you pick. Only that file goes to Claude.
-    fn teach_file(&mut self, path: PathBuf) -> Result<()> {
-        if !path.is_file() {
-            bail!("{} isn't a file", path.display());
-        }
-        let rel = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let material = Material::File { path, rel };
-        self.switch(View::Tutor);
-        self.open_material("", &material, false)
     }
 
     // ---- settings ---------------------------------------------------------

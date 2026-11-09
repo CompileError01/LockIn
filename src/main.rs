@@ -40,7 +40,7 @@ enum Cmd {
     Pdf { file: std::path::PathBuf },
     /// Open a file: PDFs in the terminal, anything else in your usual app
     Open { file: std::path::PathBuf },
-    /// Ask the tutor about one file, from the shell
+    /// Ask a teaching chat about one file, from the shell
     Teach { file: std::path::PathBuf, question: Vec<String> },
     /// Internal: talks to digi4school for the Chats tab, with the login on stdin
     #[command(hide = true)]
