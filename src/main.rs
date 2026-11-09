@@ -1,4 +1,6 @@
 mod app;
+mod books;
+mod chats;
 mod config;
 mod db;
 mod files;
@@ -40,6 +42,9 @@ enum Cmd {
     Open { file: std::path::PathBuf },
     /// Ask the tutor about one file, from the shell
     Teach { file: std::path::PathBuf, question: Vec<String> },
+    /// Internal: talks to digi4school for the Chats tab, with the login on stdin
+    #[command(hide = true)]
+    BooksHelper { mode: String, title: Option<String> },
     /// Send a test notification to the desktop and phone
     Notify,
     /// Install or update the daily systemd timer from your settings
@@ -50,6 +55,9 @@ enum Cmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(Cmd::BooksHelper { mode, title }) = &cli.cmd {
+        return books::helper(mode, title.as_deref());
+    }
     let cfg = config::load()?;
     let open_db = || db::Db::open(&config::db_path());
     match cli.cmd {
@@ -112,6 +120,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Cmd::BooksHelper { .. }) => unreachable!("handled above"),
         Some(Cmd::Notify) => {
             let errors = services::notify_all(&cfg, "LockIn test", "Notifications are working.", false, false);
             for e in &errors {

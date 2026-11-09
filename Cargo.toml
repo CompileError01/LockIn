@@ -9,10 +9,12 @@ anyhow = "1"
 base64 = "0.22"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
+digi_download_core = { git = "https://github.com/digiDownload/digiDownload", rev = "b3791215fbee86c80fc6304f925f8dc3ea9fecb8" }
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt", "net", "time"] }
 toml = "0.8"
 unicode-width = "0.2"
 

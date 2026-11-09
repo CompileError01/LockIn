@@ -1,4 +1,5 @@
 use crate::app::*;
+use crate::chats::{BookRow, Level as ChatLevel};
 use crate::db::{Grade, Task};
 use crate::files::{human_size, Entry, Preview, Sort};
 use crate::form::Target;
@@ -84,6 +85,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::Focus => draw_focus(f, app, body),
         View::Claude => draw_claude(f, app, body),
         View::Tutor => draw_tutor(f, app, body),
+        View::Chats => draw_chats(f, app, body),
         View::Settings => draw_settings(f, app, body),
     }
     draw_status(f, app, status);
@@ -150,7 +152,13 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if app.tutor_pulling {
         right.push(Span::styled(format!("{spin} downloading  "), st(BLUE)));
     }
-    if app.briefing_busy || app.chat_busy || app.tutor_busy {
+    if let Some(job) = &app.chats.job {
+        right.push(Span::styled(format!("{spin} book {}  ", job.status), st(BLUE)));
+    }
+    if app.chats.listing {
+        right.push(Span::styled(format!("{spin} digi4school  "), st(BLUE)));
+    }
+    if app.briefing_busy || app.chat_busy || app.tutor_busy || app.chats.busy {
         right.push(Span::styled(format!("{spin} claude  "), st(ORANGE)));
     }
     let now = now_ts();
@@ -189,6 +197,10 @@ fn prompt_label(p: &Prompt) -> &'static str {
         Prompt::NewHabit => "new habit: ",
         Prompt::Chat => "ask claude: ",
         Prompt::TutorAsk => "ask your tutor: ",
+        Prompt::ChatTitle(_) => "chat name (optional): ",
+        Prompt::ChatAsk => "ask claude: ",
+        Prompt::BooksEmail => "digi4school email: ",
+        Prompt::BooksPassword => "digi4school password (not saved): ",
     }
 }
 
@@ -196,10 +208,11 @@ fn draw_cmdline(f: &mut Frame, app: &App, area: Rect) {
     match &app.mode {
         Mode::Input(p) => {
             let label = prompt_label(p);
-            let text = app.input_text();
+            // A password shows as dots, and only as many as you've typed.
+            let text = if *p == Prompt::BooksPassword { "•".repeat(app.input.len()) } else { app.input_text() };
             let color = if *p == Prompt::Command || *p == Prompt::Search { FG } else { GREEN };
             f.render_widget(Paragraph::new(Line::from(vec![Span::styled(label, st(color)), Span::styled(text, st(FG))])), area);
-            let before: String = app.input[..app.cursor].iter().collect();
+            let before: String = if *p == Prompt::BooksPassword { "•".repeat(app.cursor) } else { app.input[..app.cursor].iter().collect() };
             let x = area.x + (label.width() + before.width()).min(area.width.saturating_sub(1) as usize) as u16;
             f.set_cursor_position((x, area.y));
         }
@@ -207,6 +220,8 @@ fn draw_cmdline(f: &mut Frame, app: &App, area: Rect) {
             let q = match c {
                 Confirm::TrashNote(p) => format!("Move {} to the vault's .trash? (y/n)", p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
                 Confirm::DeleteHabit(_, n) => format!("Delete habit {n} and its history? (y/n)"),
+                Confirm::DeleteChat(_, title) => format!("Delete the chat {title} and its messages? Files stay. (y/n)"),
+                Confirm::DeleteBook(p) => format!("Delete {} from this computer? (y/n)", p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
                 Confirm::DeleteTutorNote(p) => format!("Delete the note {}? (y/n)", p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
                 Confirm::RestartLesson(_) => "Start this lesson over and erase its conversation? Claude's notes stay. (y/n)".to_string(),
                 Confirm::DeleteAgenda(title) => format!("Delete {title}? (y or d to confirm, u undoes it later)"),
@@ -1427,6 +1442,237 @@ fn draw_tutor_notes(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((app.preview_scroll, 0)).block(panel(title)), side);
 }
 
+fn draw_chats(f: &mut Frame, app: &App, area: Rect) {
+    match app.chats.level {
+        ChatLevel::List => draw_chat_list(f, app, area),
+        ChatLevel::Chat => draw_chat(f, app, area),
+        ChatLevel::Files => draw_chat_files(f, app, area),
+        ChatLevel::Picker => draw_picker(f, app, area),
+        ChatLevel::Books => draw_books(f, app, area),
+    }
+}
+
+fn key_lines<'a>(keys: &[(&'a str, &'a str)]) -> Vec<Line<'a>> {
+    keys.iter().map(|(k, d)| Line::from(vec![Span::styled(format!("{k:<7}"), st(ORANGE)), Span::styled(*d, st(DIM))])).collect()
+}
+
+fn draw_chat_list(f: &mut Frame, app: &App, area: Rect) {
+    let (list, side) = with_preview(area);
+    if app.chats.list.is_empty() {
+        empty(f, list, "No chats yet. Press o to start one, or B for your books.");
+    } else {
+        let width = (list.width as usize).saturating_sub(4 + 22);
+        let rows = app
+            .chats
+            .list
+            .iter()
+            .map(|c| {
+                let files = if c.files == 1 { "1 file".to_string() } else { format!("{} files", c.files) };
+                Row::Item(Line::from(vec![Span::styled(pad(&c.title, width), st(FG)), Span::styled(format!(" {files:>9}"), st(BLUE)), Span::styled(format!(" {:>9}", fmt_rel(c.updated_at)), st(DIM))]))
+            })
+            .collect();
+        draw_buffer(f, list, rows, app.chats.sel, true);
+    }
+    let Some(side) = side else { return };
+    let mut lines = vec![
+        Line::from(Span::styled("✻ Your chats", st(ORANGE).add_modifier(Modifier::BOLD))),
+        Line::default(),
+        Line::from(Span::styled("Each chat has its own files. Claude reads them, looks up pages in big books, and says which page a number came from.", st(MUTED))),
+        Line::default(),
+    ];
+    lines.extend(key_lines(&[("o", "new chat"), ("Enter", "open"), ("r", "rename"), ("d", "delete"), ("B", "your books")]));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(panel(" Chats ")), side);
+}
+
+fn chat_lines(log: &[(Role, String)], who: &str, busy: bool, spinner: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = Vec::new();
+    for (role, text) in log {
+        match role {
+            Role::You => {
+                lines.push(Line::from(Span::styled("› You", st(BLUE).add_modifier(Modifier::BOLD))));
+                lines.extend(text.lines().map(|l| Line::from(Span::styled(l.to_string(), st(FG)))));
+                lines.push(Line::default());
+            }
+            Role::Tutor => {
+                lines.push(Line::from(Span::styled(format!("✻ {who}"), st(ORANGE).add_modifier(Modifier::BOLD))));
+                lines.extend(md_lines(text));
+                lines.push(Line::default());
+            }
+            Role::Saved => {
+                lines.push(Line::from(Span::styled(format!("  ✎ {text}"), st(GREEN))));
+                lines.push(Line::default());
+            }
+        }
+    }
+    if busy {
+        const SPIN: [&str; 4] = ["✢", "✳", "✶", "✻"];
+        lines.push(Line::from(Span::styled(format!("{} reading and thinking…", SPIN[spinner / 2 % 4]), st(ORANGE))));
+    }
+    lines
+}
+
+fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
+    let (chat_area, side) = if area.width >= 100 {
+        let [a, b] = Layout::horizontal([Constraint::Min(60), Constraint::Length(34)]).areas(area);
+        (a, Some(b))
+    } else {
+        (area, None)
+    };
+    let mut lines = chat_lines(&app.chats.log, "Claude", app.chats.busy, app.spinner);
+    if lines.is_empty() {
+        let hint = if app.chats.docs.is_empty() { "Press f to add files, or i to ask something." } else { "Press i to ask something about your files." };
+        lines.push(Line::from(Span::styled(hint, st(MUTED))));
+    }
+    let block = panel(format!(" ✻ {} ", fit(&app.chats.title, (chat_area.width as usize).saturating_sub(8))));
+    let inner = block.inner(chat_area);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let max = (para.line_count(inner.width) as u16).saturating_sub(inner.height);
+    let scroll = max.saturating_sub(app.chats.scroll.min(max));
+    f.render_widget(para.scroll((scroll, 0)).block(block), chat_area);
+
+    let Some(side) = side else { return };
+    let mut info = vec![Line::from(Span::styled(format!("Files ({})", app.chats.docs.len()), st(ORANGE).add_modifier(Modifier::BOLD)))];
+    if app.chats.docs.is_empty() {
+        info.push(Line::from(Span::styled("None yet.", st(DIM))));
+    }
+    let room = side.height.saturating_sub(10) as usize;
+    for d in app.chats.docs.iter().take(room) {
+        let name = d.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        info.push(Line::from(Span::styled(fit(&name, side.width.saturating_sub(2) as usize), st(MUTED))));
+    }
+    if app.chats.docs.len() > room {
+        info.push(Line::from(Span::styled(format!("+{} more", app.chats.docs.len() - room), st(DIM))));
+    }
+    info.push(Line::default());
+    info.extend(key_lines(&[("i", "ask"), ("f", "files"), ("j k", "scroll"), ("h", "back")]));
+    f.render_widget(Paragraph::new(info).block(panel(" This chat ")), side);
+}
+
+fn draw_chat_files(f: &mut Frame, app: &App, area: Rect) {
+    let (list, side) = with_preview(area);
+    if app.chats.docs.is_empty() {
+        empty(f, list, "No files in this chat. Press a to add some.");
+    } else {
+        let width = (list.width as usize).saturating_sub(5);
+        let rows = app
+            .chats
+            .docs
+            .iter()
+            .map(|d| {
+                let name = d.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let color = if d.exists() { FG } else { RED };
+                Row::Item(Line::from(Span::styled(fit(&name, width), st(color))))
+            })
+            .collect();
+        draw_buffer(f, list, rows, app.chats.file_sel, true);
+    }
+    let Some(side) = side else { return };
+    let mut lines = vec![Line::from(Span::styled(app.chats.title.clone(), st(FG).add_modifier(Modifier::BOLD))), Line::default()];
+    if let Some(d) = app.chats.docs.get(app.chats.file_sel) {
+        lines.push(Line::from(Span::styled(d.display().to_string(), st(DIM))));
+        if !d.exists() {
+            lines.push(Line::from(Span::styled("This file has moved or been deleted.", st(RED))));
+        }
+        lines.push(Line::default());
+    }
+    lines.extend(key_lines(&[("a", "add files"), ("d", "remove from chat"), ("v", "view"), ("h", "back to the chat")]));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(panel(" Files in this chat ")), side);
+}
+
+fn draw_picker(f: &mut Frame, app: &App, area: Rect) {
+    let (list, side) = with_preview(area);
+    let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(list);
+    match &app.chats.browser {
+        None => {
+            f.render_widget(Paragraph::new(Span::styled(" Add files from", st(BLUE).add_modifier(Modifier::BOLD))), head);
+            let rows = app.picker_roots().iter().map(|(name, path)| {
+                let count = if path.is_dir() { String::new() } else { "  empty".to_string() };
+                Row::Item(Line::from(vec![Span::styled(name.to_string(), st(FG)), Span::styled(count, st(DIM))]))
+            }).collect();
+            draw_buffer(f, body, rows, app.chats.root_sel, true);
+        }
+        Some(browser) => {
+            f.render_widget(Paragraph::new(Span::styled(format!(" {}", fit(&browser.location(), head.width as usize)), st(BLUE).add_modifier(Modifier::BOLD))), head);
+            let entries = app.picker_entries();
+            if entries.is_empty() {
+                empty(f, body, "This folder is empty.");
+            } else {
+                let width = (body.width as usize).saturating_sub(4 + 6);
+                let rows = entries
+                    .iter()
+                    .map(|e| {
+                        let added = app.chats.docs.contains(&e.path);
+                        let (icon, color) = file_icon(e, app.cfg.nerd_icons);
+                        Row::Item(Line::from(vec![
+                            Span::styled(if added { "✓ " } else { "  " }, st(GREEN)),
+                            Span::styled(format!("{icon} "), st(color)),
+                            Span::styled(fit(&e.name, width), st(if e.is_dir { BLUE } else if added { GREEN } else { FG })),
+                        ]))
+                    })
+                    .collect();
+                draw_buffer(f, body, rows, app.chats.entry_sel, true);
+            }
+        }
+    }
+    let Some(side) = side else { return };
+    let block = panel(format!(" {} added ", app.chats.docs.len()));
+    let inner = block.inner(side);
+    f.render_widget(block, side);
+    let keys = "Enter open or add  x add  / filter  h back";
+    if app.chats.browser.is_some() && inner.height > 2 {
+        let [view, foot] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+        draw_preview_content(f, view, &app.chats.preview, None, app);
+        f.render_widget(Paragraph::new(Span::styled(fit(keys, foot.width as usize), st(DIM))), foot);
+    } else {
+        let note = "Pick where to look. Files stay where they are, and Claude only sees the ones you add.";
+        f.render_widget(Paragraph::new(Span::styled(note, st(MUTED))).wrap(Wrap { trim: false }), inner);
+    }
+}
+
+fn draw_books(f: &mut Frame, app: &App, area: Rect) {
+    let (list, side) = with_preview(area);
+    let rows_data = app.book_rows();
+    if rows_data.is_empty() {
+        empty(f, list, "No books yet. Press L to log in to digi4school and see yours.");
+    } else {
+        let width = (list.width as usize).saturating_sub(5 + 2);
+        let mut rows = Vec::new();
+        let mut last = "";
+        for row in &rows_data {
+            let section = match row {
+                BookRow::Local(_) => "On this computer",
+                BookRow::Remote(_) => "On your digi4school account",
+            };
+            if section != last {
+                rows.push(section_header(section));
+                last = section;
+            }
+            let (title, color) = match row {
+                BookRow::Local(p) => (p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), FG),
+                BookRow::Remote(b) => (format!("{} ({})", b.title, b.year), MUTED),
+            };
+            rows.push(Row::Item(Line::from(Span::styled(fit(&title, width), st(color)))));
+        }
+        draw_buffer(f, list, rows, app.chats.book_sel, true);
+    }
+    let Some(side) = side else { return };
+    let mut lines = vec![Line::from(Span::styled("Your digi4school books", st(ORANGE).add_modifier(Modifier::BOLD))), Line::default()];
+    if let Some(job) = &app.chats.job {
+        lines.push(Line::from(Span::styled(fit(&job.title, side.width.saturating_sub(2) as usize), st(FG))));
+        lines.push(Line::from(Span::styled(job.status.clone(), st(BLUE))));
+        lines.push(Line::default());
+    }
+    let account = if app.cfg.digi4school_email.is_empty() { "not set".to_string() } else { app.cfg.digi4school_email.clone() };
+    lines.push(Line::from(vec![Span::styled("account  ", st(DIM)), Span::styled(account, st(MUTED))]));
+    let state = if app.chats.password.is_some() { "logged in until you quit" } else { "asked each time you open LockIn" };
+    lines.push(Line::from(vec![Span::styled("password ", st(DIM)), Span::styled(state, st(MUTED))]));
+    lines.push(Line::default());
+    lines.extend(key_lines(&[("L", "log in, list your books"), ("Enter", "download or read"), ("x", "stop a download"), ("d", "delete from this computer"), ("h", "back")]));
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled("These books are licensed to your account. They stay on this computer, so please don't share them.", st(DIM))));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(panel(" Books ")), side);
+}
+
 // ---- popups ---------------------------------------------------------------
 
 const LEADER_KEYS: &[(&str, &str)] = &[
@@ -1441,6 +1687,7 @@ const LEADER_KEYS: &[(&str, &str)] = &[
     ("p", "focus timer"),
     ("a", "ask claude"),
     ("l", "learn with your tutor"),
+    ("C", "chats with your files"),
     ("m", "open moodle cli"),
     (",", "settings"),
     ("s", "sync moodle"),
@@ -1524,12 +1771,19 @@ In Claude's notes: Enter edit   d delete   u undo
 L on a Moodle task, or on a file in Notes, starts a lesson on it.
 Only what you open goes to Claude.
 
+# Chats
+o  new chat   Enter open   r rename   d delete   B your books
+In a chat: i ask   f files   j k scroll   h back
+Files: a add   d remove   v view     Adding: Enter open or add   x add   h back
+Books: L log in and list   Enter download or read   x stop   d delete
+Claude finds pages in big books itself, and says where each number came from.
+
 # Settings
 j k  move   Enter or x  change   h l  step a value
 
 # Commands
 :sync   :brief   :add ...   :event ...   :note name   :daily   :habit name
-:focus 25   :stop   :filter moodle   :notify   :moodle   :pdf file   :settings   :q
+:focus 25   :stop   :filter moodle   :notify   :moodle   :pdf file   :chats   :books   :settings   :q
 ";
 
 fn draw_help(f: &mut Frame, app: &App, body: Rect) {
@@ -1870,6 +2124,90 @@ mod tests {
         app.tutor_busy = false;
         press(&mut app, "hh");
         assert_eq!(app.tutor_level, TutorLevel::Courses);
+
+        // Chats: make one, add files from the picker, ask, remove a file, delete the chat.
+        press(&mut app, ":chats\n");
+        assert_eq!(app.view, View::Chats);
+        assert!(screen(&mut app, 120, 30).contains("No chats yet"));
+        press(&mut app, "oPhysik\n");
+        assert_eq!(app.chats.level, ChatLevel::Files, "a new chat goes straight to adding files");
+        assert_eq!(app.chats.title, "Physik");
+        press(&mut app, "a");
+        assert_eq!(app.chats.level, ChatLevel::Picker);
+        assert!(screen(&mut app, 120, 30).contains("Moodle downloads"));
+        app.chats.root_sel = 2;
+        press(&mut app, "\n");
+        assert!(app.chats.browser.is_some());
+        let school = app.picker_entries().iter().position(|e| e.name == "School").unwrap();
+        app.chats.entry_sel = school;
+        press(&mut app, "l");
+        assert_eq!(app.picker_entries().len(), 1);
+        press(&mut app, "\n");
+        assert_eq!(app.chats.docs.len(), 1, "{}", app.msg);
+        assert!(screen(&mut app, 120, 30).contains("Mathe Übung"));
+        press(&mut app, "x");
+        assert!(app.chats.docs.is_empty(), "x takes it back out");
+        press(&mut app, "x");
+        press(&mut app, "hhh");
+        assert_eq!(app.chats.level, ChatLevel::Files);
+        assert_eq!(app.chats.docs.len(), 1);
+        press(&mut app, "h");
+        assert_eq!(app.chats.level, ChatLevel::Chat);
+        press(&mut app, "iWie hoch ist die Dichte?\n");
+        assert!(app.chats.busy);
+        assert_eq!(app.chats.log[0].1, "Wie hoch ist die Dichte?");
+        press(&mut app, "ianother\n");
+        assert_eq!(app.msg_kind, MsgKind::Error, "one question at a time");
+        assert!(screen(&mut app, 120, 30).contains("Mathe Übung"), "the chat lists its files");
+        app.chats.busy = false;
+        press(&mut app, "f");
+        press(&mut app, "d");
+        assert!(app.chats.docs.is_empty());
+        assert!(vault.join("School/Mathe Übung.md").exists(), "removing from a chat leaves the file alone");
+        press(&mut app, "hh");
+        assert_eq!(app.chats.level, ChatLevel::List);
+        press(&mut app, "rx\n");
+        assert_eq!(app.chats.list[0].title, "Physikx");
+        // The password is masked on screen, kept in memory only, and never reaches the config.
+        press(&mut app, ":books\n");
+        assert_eq!(app.chats.level, ChatLevel::Books);
+        press(&mut app, "Lnot-an-email\n");
+        assert_eq!(app.msg_kind, MsgKind::Error);
+        press(&mut app, "Lme@example.com\n");
+        assert_eq!(app.mode, Mode::Input(Prompt::BooksPassword));
+        press(&mut app, "hunter2secret");
+        let masked = screen(&mut app, 120, 30);
+        assert!(!masked.contains("hunter2") && masked.contains("•••••"), "{masked}");
+        press(&mut app, "\n");
+        assert_eq!(app.chats.password.as_deref(), Some("hunter2secret"));
+        assert!(app.input.is_empty(), "the password doesn't stay in the input buffer");
+        let on_disk = std::fs::read_to_string(crate::config::config_path()).unwrap();
+        assert!(on_disk.contains("me@example.com") && !on_disk.contains("hunter2"), "{on_disk}");
+        // A rejected login forgets the password, so the next try asks again.
+        app.on_book_event(serde_json::json!({"event": "error", "message": "Login failed: bad login"}));
+        assert!(app.chats.password.is_none());
+        assert!(!app.chats.listing);
+        app.on_book_event(serde_json::json!({"event": "books", "books": [{"title": "Physik 2", "year": 2025}]}));
+        assert!(screen(&mut app, 120, 30).contains("Physik 2 (2025)"));
+        app.chats.password = Some("pw".into());
+        app.chats.book_sel = 0;
+        press(&mut app, "\n");
+        assert_eq!(app.chats.job.as_ref().unwrap().title, "Physik 2");
+        app.on_book_event(serde_json::json!({"event": "progress", "volume": "v", "page": 3, "total": 10}));
+        assert!(screen(&mut app, 120, 30).contains("page 3/10"));
+        app.on_book_event(serde_json::json!({"event": "done", "title": "Physik 2", "count": 1}));
+        assert!(app.chats.job.is_none());
+        for level in [ChatLevel::List, ChatLevel::Chat, ChatLevel::Files, ChatLevel::Picker, ChatLevel::Books] {
+            app.chats.level = level;
+            for (w, h) in [(160, 45), (120, 30), (80, 24), (60, 16), (30, 8), (10, 4)] {
+                screen(&mut app, w, h);
+            }
+        }
+        app.chats.level = ChatLevel::List;
+        press(&mut app, "dn");
+        assert_eq!(app.chats.list.len(), 1, "n cancels");
+        press(&mut app, "dy");
+        assert!(app.chats.list.is_empty());
 
         // Quitting during a focus session asks first.
         press(&mut app, ":q\n");

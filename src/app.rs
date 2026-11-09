@@ -1,3 +1,4 @@
+use crate::chats::{ChatsState, Level as ChatLevel};
 use crate::config::{config_path, db_path, find_bin, Config};
 use crate::db::{Briefing, Db, Event, Grade, Habit, InboxItem, Task};
 use crate::files::{self, Browser, Entry, Preview, Sort, Yank};
@@ -24,10 +25,11 @@ pub enum View {
     Focus,
     Claude,
     Tutor,
+    Chats,
     Settings,
 }
 
-pub const VIEWS: [(View, &str); 10] = [
+pub const VIEWS: [(View, &str); 11] = [
     (View::Today, "Today"),
     (View::Tasks, "Tasks"),
     (View::Calendar, "Calendar"),
@@ -37,6 +39,7 @@ pub const VIEWS: [(View, &str); 10] = [
     (View::Focus, "Focus"),
     (View::Claude, "Claude"),
     (View::Tutor, "Tutor"),
+    (View::Chats, "Chats"),
     (View::Settings, "Settings"),
 ];
 
@@ -53,6 +56,10 @@ pub enum Prompt {
     NewHabit,
     Chat,
     TutorAsk,
+    ChatTitle(Option<i64>),
+    ChatAsk,
+    BooksEmail,
+    BooksPassword,
     Setting(settings::Key),
 }
 
@@ -63,6 +70,8 @@ pub enum Confirm {
     DeleteAgenda(String),
     DeleteTutorNote(PathBuf),
     RestartLesson(usize),
+    DeleteChat(i64, String),
+    DeleteBook(PathBuf),
     Quit,
 }
 
@@ -113,12 +122,14 @@ pub enum EditTarget {
     Pdf(PathBuf),
 }
 
-enum Bg {
+pub(crate) enum Bg {
     Sync(Result<String, String>),
     Brief(Result<String, String>),
     Chat(Result<String, String>),
     Tutor(Result<(), String>),
     TutorPull(Result<String, String>),
+    Chats(Result<(), String>),
+    Book(serde_json::Value),
 }
 
 pub struct NoteEntry {
@@ -220,6 +231,7 @@ pub struct App {
     pub find_sel: usize,
     preview_path: Option<PathBuf>,
     pub form: Option<Form>,
+    pub chats: ChatsState,
     pub tutor_level: TutorLevel,
     pub tutor_courses: Vec<Course>,
     pub tutor_course: usize,
@@ -254,12 +266,12 @@ pub struct App {
     history_pos: Option<usize>,
     last_version: i64,
     last_reload: Instant,
-    tx: Sender<Bg>,
+    pub(crate) tx: Sender<Bg>,
     rx: Receiver<Bg>,
 }
 
 const COMMANDS: &[&str] = &[
-    "add", "brief", "calendar", "claude", "config", "daily", "event", "filter", "focus", "grades", "habit", "habits", "help", "moodle", "note",
+    "add", "brief", "books", "calendar", "chats", "claude", "config", "daily", "event", "filter", "focus", "grades", "habit", "habits", "help", "moodle", "note",
     "notes", "notify", "pdf", "q", "qa", "settings", "stop", "sync", "tasks", "today", "w", "wq",
 ];
 
@@ -330,6 +342,7 @@ impl App {
             find_sel: 0,
             preview_path: None,
             form: None,
+            chats: ChatsState::default(),
             tutor_level: TutorLevel::Courses,
             tutor_courses: vec![],
             tutor_course: 0,
@@ -381,6 +394,7 @@ impl App {
         self.last_sync = self.db.meta("last_sync").and_then(|v| v.parse().ok());
         self.last_version = self.db.data_version();
         self.reload_tutor();
+        self.reload_chats();
         self.clamp();
         Ok(())
     }
@@ -506,6 +520,7 @@ impl App {
             View::Habits => self.habits.len(),
             View::Grades => self.visible_grades().len(),
             View::Settings => settings::ROWS.len(),
+            View::Chats => self.chats_len(),
             View::Tutor => match self.tutor_level {
                 TutorLevel::Courses => self.tutor_courses.len(),
                 TutorLevel::Materials => self.tutor_materials.len(),
@@ -524,6 +539,7 @@ impl App {
             View::Habits => Some(&mut self.sel_habits),
             View::Grades => Some(&mut self.sel_grades),
             View::Settings => Some(&mut self.sel_settings),
+            View::Chats => self.chats_sel_mut(),
             View::Tutor => match self.tutor_level {
                 TutorLevel::Courses => Some(&mut self.tutor_course),
                 TutorLevel::Materials => Some(&mut self.tutor_material),
@@ -545,6 +561,7 @@ impl App {
         self.tutor_course = self.tutor_course.min(last(self.tutor_courses.len()));
         self.tutor_material = self.tutor_material.min(last(self.tutor_materials.len()));
         self.tutor_note = self.tutor_note.min(last(self.tutor_notes.len()));
+        self.clamp_chats();
     }
 
     fn move_sel(&mut self, delta: isize) {
@@ -567,6 +584,9 @@ impl App {
 
     /// Refreshes the file preview before a draw, since drawing only reads state.
     pub fn prepare(&mut self) {
+        if self.view == View::Chats {
+            return self.prepare_chats();
+        }
         if self.view == View::Tutor {
             let target = match (self.tutor_level, self.tutor_materials.get(self.tutor_material)) {
                 (TutorLevel::Materials, Some(Material::File { path, rel })) => Some(Entry { name: rel.clone(), path: path.clone(), is_dir: false, size: 0, modified: 0 }),
@@ -638,6 +658,16 @@ impl App {
                     Err(e) => self.error(e),
                 }
             }
+            Bg::Chats(r) => {
+                self.chats.busy = false;
+                self.chats.scroll = 0;
+                match r {
+                    Ok(()) if self.view != View::Chats => self.info("Claude answered in your chat"),
+                    Ok(()) => {}
+                    Err(e) => self.error(format!("Chat: {e}")),
+                }
+            }
+            Bg::Book(event) => self.on_book_event(event),
             Bg::Chat(r) => {
                 self.chat_busy = false;
                 match r {
@@ -707,7 +737,7 @@ impl App {
         self.msg_kind = MsgKind::Error;
     }
 
-    fn attempt(&mut self, r: Result<()>) {
+    pub(crate) fn attempt(&mut self, r: Result<()>) {
         if let Err(e) = r {
             self.error(e.to_string());
         }
@@ -766,7 +796,7 @@ impl App {
 
     // ---- input ------------------------------------------------------------
 
-    fn open_prompt(&mut self, prompt: Prompt, initial: &str) {
+    pub(crate) fn open_prompt(&mut self, prompt: Prompt, initial: &str) {
         self.input = initial.chars().collect();
         self.cursor = self.input.len();
         self.history_pos = None;
@@ -795,6 +825,15 @@ impl App {
         }
         match c {
             Confirm::DeleteAgenda(_) => self.delete_current(),
+            Confirm::DeleteChat(id, title) => {
+                let r = tutor::delete_session(&self.db, id);
+                self.attempt(r);
+                self.info(format!("Deleted {title}. Your files are untouched"));
+            }
+            Confirm::DeleteBook(path) => {
+                let r = self.delete_book(&path);
+                self.attempt(r);
+            }
             Confirm::DeleteTutorNote(path) => {
                 let root = tutor::notes_root();
                 let r = files::trash(&root, &path).map(|dest| {
@@ -837,12 +876,24 @@ impl App {
                     self.search.clear();
                     self.clamp();
                 }
+                self.input.clear();
+                self.cursor = 0;
                 self.mode = Mode::Normal;
                 return;
             }
             KeyCode::Enter => {
                 let text = self.input_text();
                 self.mode = Mode::Normal;
+                if prompt == Prompt::BooksPassword {
+                    // Passwords can start or end with a space, and shouldn't stay in the input buffer.
+                    self.input.clear();
+                    self.cursor = 0;
+                    if !text.is_empty() {
+                        self.chats.password = Some(text);
+                        self.books_login();
+                    }
+                    return;
+                }
                 return self.submit(prompt, text.trim().to_string());
             }
             KeyCode::Backspace => {
@@ -966,6 +1017,12 @@ impl App {
                 self.send_chat(text);
                 Ok(())
             }
+            Prompt::ChatTitle(id) => self.create_or_rename_chat(id, &text),
+            Prompt::ChatAsk if text.is_empty() => Ok(()),
+            Prompt::ChatAsk => self.ask_chat(text),
+            Prompt::BooksEmail if text.is_empty() => Ok(()),
+            Prompt::BooksEmail => self.set_books_email(&text),
+            Prompt::BooksPassword => Ok(()),
             Prompt::TutorAsk if text.is_empty() => Ok(()),
             Prompt::TutorAsk => self.ask_tutor(text),
             _ if text.is_empty() && !matches!(prompt, Prompt::SetDue(_) | Prompt::Setting(settings::Key::AboutMe)) => Ok(()),
@@ -1230,6 +1287,11 @@ impl App {
             "habits" => self.switch(View::Habits),
             "grades" => self.switch(View::Grades),
             "claude" => self.switch(View::Claude),
+            "chats" => self.switch(View::Chats),
+            "books" => {
+                self.switch(View::Chats);
+                self.on_chats_key('B', 1);
+            }
             "tutor" if arg.is_empty() => self.switch(View::Tutor),
             "tutor" => {
                 let path = match arg.strip_prefix("~/") {
@@ -1303,6 +1365,7 @@ impl App {
             View::Notes => self.scan_notes(),
             View::Settings => self.timer_next = services::timer_next_run(),
             View::Tutor => self.refresh_tutor_lists(),
+            View::Chats => self.reload_chats(),
             _ => {}
         }
         self.clamp();
@@ -1354,6 +1417,9 @@ impl App {
         if self.view == View::Calendar && c == 'd' {
             return self.ask_delete_agenda();
         }
+        if self.view == View::Chats && c == 'd' {
+            return self.chats_delete();
+        }
         if self.view == View::Tutor && c == 'd' && self.tutor_level == TutorLevel::Notes {
             if let Some(n) = self.tutor_notes.get(self.tutor_note) {
                 self.mode = Mode::Confirm(Confirm::DeleteTutorNote(n.path.clone()));
@@ -1382,6 +1448,8 @@ impl App {
                     self.clamp();
                 } else if self.view == View::Tutor {
                     self.tutor_back();
+                } else if self.view == View::Chats {
+                    self.chats_back();
                 }
             }
             KeyCode::Down => self.on_view_key('j', times),
@@ -1408,6 +1476,9 @@ impl App {
     fn half_page(&mut self, dir: isize) {
         match self.view {
             View::Claude => self.chat_scroll = if dir > 0 { self.chat_scroll.saturating_sub(10) } else { self.chat_scroll.saturating_add(10) },
+            View::Chats if self.chats.level == ChatLevel::Chat => {
+                self.chats.scroll = if dir > 0 { self.chats.scroll.saturating_sub(10) } else { self.chats.scroll.saturating_add(10) }
+            }
             View::Tutor if self.tutor_level == TutorLevel::Lesson => {
                 self.tutor_scroll = if dir > 0 { self.tutor_scroll.saturating_sub(10) } else { self.tutor_scroll.saturating_add(10) }
             }
@@ -1421,6 +1492,7 @@ impl App {
             ('g', 'g') => match self.view {
                 View::Claude => self.chat_scroll = u16::MAX,
                 View::Tutor if self.tutor_level == TutorLevel::Lesson => self.tutor_scroll = u16::MAX,
+                View::Chats if self.chats.level == ChatLevel::Chat => self.chats.scroll = u16::MAX,
                 _ => self.set_sel(n.map_or(0, |v| v.saturating_sub(1))),
             },
             ('g', 't') => match n {
@@ -1462,6 +1534,7 @@ impl App {
                 self.open_prompt(Prompt::VaultFind, "");
             }
             (' ', 'l') => self.switch(View::Tutor),
+            (' ', 'C') => self.switch(View::Chats),
             (' ', 'm') => self.want_editor = Some(EditTarget::MoodleApp),
             (' ', ',') => self.switch(View::Settings),
             (' ', 's') => self.start_sync(),
@@ -1504,6 +1577,7 @@ impl App {
             }
             View::Notes => self.open_entry(),
             View::Tutor => self.tutor_enter(),
+            View::Chats => self.chats_enter(),
             View::Settings => self.activate_setting(),
             View::Claude => self.open_prompt(Prompt::Chat, ""),
             _ => {}
@@ -1527,6 +1601,11 @@ impl App {
             }
             View::Tutor => {
                 if self.on_tutor_key(c, times) {
+                    return;
+                }
+            }
+            View::Chats => {
+                if self.on_chats_key(c, times) {
                     return;
                 }
             }

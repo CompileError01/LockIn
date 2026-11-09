@@ -5,6 +5,10 @@ lockin.tar.gz
 # Not published: third-party script, kept local until sharing it is confirmed
 vendor/
 
+# Books are licensed to one account, so no PDFs or book folders go in here
+*.pdf
+books/
+
 # Secrets and personal data must never be uploaded
 .env
 .env.*

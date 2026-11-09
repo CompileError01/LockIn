@@ -106,6 +106,27 @@ come back to them. Each lesson uses your Claude usage, and you can choose the mo
 
 Claude has no tools here either. It only sees the material you open, plus its own notes.
 
+## Chats
+
+The Chats tab holds chats you create yourself. Press `o` for a new chat, then `a` to add any PDFs or text
+files from your books, Moodle downloads or notes. Claude sees only the files you add. It reads short
+files right away. In long books it searches for the right page and looks at it, then tells you which page
+a number came from.
+
+## Books from digi4school
+
+Press `B` in the Chats tab, then `L` to log in with your digi4school account and see your books. Press
+Enter on one to download it, and add it to a chat like any other file.
+
+- Downloading goes through [digiDownload](https://github.com/digiDownload/digiDownload) (MIT licence).
+- Your email is saved in your settings. Your password isn't saved anywhere: LockIn keeps it in memory
+  until you quit, and asks again next time.
+- An interrupted download carries on from the last saved page.
+- Books go in `~/.local/share/lockin/books`, which only you can read. They're licensed to your account,
+  so they stay out of this repo. Only download books you have access to, and don't share them. Pages you
+  ask about in a chat are sent to Claude.
+- Check that downloading fits digi4school's terms of use for your account.
+
 ## Phone notifications
 
 Install the ntfy app and subscribe to the topic that `lockin status` prints. The topic name is the

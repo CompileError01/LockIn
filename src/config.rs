@@ -16,6 +16,8 @@ pub struct Config {
     pub model: String,
     /// Model alias for the Tutor tab.
     pub tutor_model: String,
+    /// Your digi4school login name. The password is never saved.
+    pub digi4school_email: String,
     /// `auto` follows the language you write in, or name one like `English`.
     pub tutor_language: String,
     /// A line about you that Claude reads when planning, like your school and year.
@@ -51,6 +53,7 @@ impl Default for Config {
             model: "sonnet".into(),
             tutor_model: "sonnet".into(),
             tutor_language: "auto".into(),
+            digi4school_email: String::new(),
             about_me: String::new(),
             desktop_notifications: true,
             // Off until you choose it, because task titles get sent to a public server.
