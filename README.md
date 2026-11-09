@@ -193,6 +193,7 @@ remind me to call mum tomorrow at 5     Claude works out what you mean
 what's due this week?                   Claude answers from your tasks and calendar
 hi                                      checks the connection, with no Claude
 add Read chapter 4 @fri 18:00           adds a task, with no Claude
+event Shopping @tom 17:00               adds to your calendar and week, with no Claude
 list                                    open tasks, with their numbers
 done 12                                 ticks off task 12
 sync                                    updates from Moodle
