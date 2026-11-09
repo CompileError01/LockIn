@@ -1,6 +1,6 @@
 # LockIn
 
-A Neovim-style terminal organizer with tasks, a calendar, Obsidian notes, habits, grades and a
+A Neovim-style terminal organizer with tasks, a week planner, a calendar, Obsidian notes, habits and a
 focus timer. It syncs with Moodle, and Claude writes a plan for you every day at the times you choose.
 
 ## Install
@@ -25,8 +25,9 @@ what's due instead of a plan.
 ```
 lockin            open the app (press ? for all keys, Space for the shortcut menu)
 lockin daily      sync Moodle, ask Claude, send notifications (what the timer runs)
-lockin sync       pull deadlines, events and grades from Moodle
+lockin sync       pull deadlines and events from Moodle, and your timetable and tests from Untis
 lockin brief      ask Claude for a new plan and print it
+lockin plan       plan study sessions for your upcoming tests
 lockin today      print open tasks
 lockin add "Read chapter 4 @fri 18:00 !! #AM ~45m"
 lockin pdf FILE   read a PDF in the terminal
@@ -91,6 +92,22 @@ export MOODLE_OPENER="lockin open"
 ```
 
 Needs `poppler`.
+
+## Week planner
+
+The Week tab shows your timetable from Untis, with changes and cancellations marked, your tests, your own
+events, and deadlines. It needs the `untis` command, logged in, in `~/.local/bin`. Without it, the tab still
+shows your own things. Press `[` and `]` to change week.
+
+Press `p`, or run `lockin plan`, to plan study sessions for tests in the next four weeks. Code works out
+your free time first, so a session can't land on a lesson or an event: after school until 20:00 by default,
+and 10:00 to 18:00 on days without lessons. Claude then picks among those slots and says what to focus on,
+and everything it picks is checked. A plain spacing plan fills any gaps, or runs alone without Claude.
+
+A Schularbeit gets 5 sessions, a test gets 3, and a test of 30 minutes or less gets 2. Sessions show up on the
+calendar too. Sessions you edit or move are yours, and planning again keeps them. Press `u` to undo a plan.
+The daily job plans each new test once, so a session you delete stays deleted. The hours, the session
+length and the daily limit are in the Settings tab.
 
 ## Chats
 

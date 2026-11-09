@@ -6,6 +6,7 @@ mod db;
 mod files;
 mod form;
 mod pdf;
+mod planner;
 mod replies;
 mod services;
 mod settings;
@@ -27,7 +28,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Pull deadlines, calendar events and grades from Moodle
+    /// Pull deadlines and events from Moodle, and your timetable and tests from Untis
     Sync,
     /// Ask Claude for a new briefing and print it
     Brief,
@@ -55,6 +56,8 @@ enum Cmd {
     /// Internal: the background service for phone replies
     #[command(hide = true)]
     Listen,
+    /// Plan study sessions for your upcoming tests
+    Plan,
     /// Send a test notification to the desktop and phone
     Notify,
     /// Install or update the daily systemd timer from your settings
@@ -73,8 +76,12 @@ fn main() -> Result<()> {
     match cli.cmd {
         None => run_tui(cfg),
         Some(Cmd::Sync) => {
-            let s = services::sync(&mut open_db()?)?;
+            let mut db = open_db()?;
+            let s = services::sync(&mut db)?;
             println!("{} new, {} updated, {} finished", s.added, s.updated, s.completed);
+            if let Some(summary) = services::sync_untis(&mut db)? {
+                println!("timetable: {summary}");
+            }
             Ok(())
         }
         Some(Cmd::Brief) => {
@@ -132,6 +139,18 @@ fn main() -> Result<()> {
         }
         Some(Cmd::BooksHelper { .. }) => unreachable!("handled above"),
         Some(Cmd::BooksDebug) => books::debug(&cfg.digi4school_email),
+        Some(Cmd::Plan) => {
+            let mut db = open_db()?;
+            if let Err(e) = services::sync_untis(&mut db) {
+                eprintln!("{e}. Using the last synced timetable.");
+            }
+            let outcome = planner::plan(&db, &cfg, planner::Mode::Replan, true)?;
+            for e in &outcome.added {
+                println!("{}  {}  {}", timeutil::fmt_abs(e.start), e.title, e.notes);
+            }
+            println!("{}", outcome.summary());
+            Ok(())
+        }
         Some(Cmd::Listen) => replies::listen(&cfg),
         Some(Cmd::Phone) => {
             let link = format!("{}/{}", cfg.ntfy_server.trim_end_matches('/'), cfg.ntfy_topic);

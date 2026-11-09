@@ -21,6 +21,13 @@ pub enum Key {
     TutorModel,
     TutorLanguage,
     AboutMe,
+    StudyAuto,
+    StudyLength,
+    StudyPerDay,
+    StudyUntil,
+    StudyFreeFrom,
+    StudyFreeUntil,
+    PlanNow,
     FocusMinutes,
     BreakMinutes,
     Vault,
@@ -59,6 +66,13 @@ pub const ROWS: &[(&str, Key)] = &[
     ("Claude", Key::TutorModel),
     ("Claude", Key::TutorLanguage),
     ("Claude", Key::AboutMe),
+    ("Study planner", Key::StudyAuto),
+    ("Study planner", Key::StudyLength),
+    ("Study planner", Key::StudyPerDay),
+    ("Study planner", Key::StudyUntil),
+    ("Study planner", Key::StudyFreeFrom),
+    ("Study planner", Key::StudyFreeUntil),
+    ("Study planner", Key::PlanNow),
     ("Focus timer", Key::FocusMinutes),
     ("Focus timer", Key::BreakMinutes),
     ("Notes", Key::Vault),
@@ -75,14 +89,15 @@ pub const ROWS: &[(&str, Key)] = &[
 const SYNC_STEPS: [i64; 7] = [0, 15, 30, 60, 120, 240, 480];
 const MODELS: [&str; 3] = ["haiku", "sonnet", "opus"];
 const LANGUAGES: [&str; 3] = ["auto", "English", "Deutsch"];
+const STUDY_LENGTHS: [i64; 5] = [25, 45, 50, 60, 90];
 
 pub fn kind(key: Key) -> Kind {
     use Key::*;
     match key {
-        DailyEnabled | DailyCatchUp | DailyClaude | SyncOnOpen | Desktop | Phone | PhoneReplies | Icons => Kind::Toggle,
-        DailyDays | SyncInterval | Model | TutorModel | TutorLanguage | FocusMinutes | BreakMinutes => Kind::Choice,
-        DailyTimes | NtfyServer | NtfyTopic | AboutMe | Vault | NewNoteDir | Editor => Kind::Text,
-        RunDaily | SyncNow | TestNotify | ForgetBooksPassword | EditFile => Kind::Action,
+        DailyEnabled | DailyCatchUp | DailyClaude | SyncOnOpen | Desktop | Phone | PhoneReplies | Icons | StudyAuto => Kind::Toggle,
+        DailyDays | SyncInterval | Model | TutorModel | TutorLanguage | FocusMinutes | BreakMinutes | StudyLength | StudyPerDay => Kind::Choice,
+        DailyTimes | NtfyServer | NtfyTopic | AboutMe | Vault | NewNoteDir | Editor | StudyUntil | StudyFreeFrom | StudyFreeUntil => Kind::Text,
+        RunDaily | SyncNow | TestNotify | ForgetBooksPassword | EditFile | PlanNow => Kind::Action,
     }
 }
 
@@ -108,6 +123,13 @@ pub fn label(key: Key) -> &'static str {
         Key::TutorModel => "Chat model",
         Key::TutorLanguage => "Chat language",
         Key::AboutMe => "About you",
+        Key::StudyAuto => "Plan new tests automatically",
+        Key::StudyLength => "Session length",
+        Key::StudyPerDay => "Most sessions a day",
+        Key::StudyUntil => "Finish by, on school days",
+        Key::StudyFreeFrom => "Start from, on free days",
+        Key::StudyFreeUntil => "Finish by, on free days",
+        Key::PlanNow => "Plan my study sessions now",
         Key::FocusMinutes => "Focus length",
         Key::BreakMinutes => "Break length",
         Key::Vault => "Vault folder",
@@ -145,6 +167,13 @@ pub fn value(cfg: &Config, key: Key) -> String {
         Key::TutorModel => cfg.tutor_model.clone(),
         Key::TutorLanguage => cfg.tutor_language.clone(),
         Key::AboutMe => cfg.about_me.clone(),
+        Key::StudyAuto => on_off(cfg.study_auto_plan),
+        Key::StudyLength => format!("{} min", cfg.study_session_minutes),
+        Key::StudyPerDay => cfg.study_max_per_day.to_string(),
+        Key::StudyUntil => cfg.study_until.clone(),
+        Key::StudyFreeFrom => cfg.study_free_day_from.clone(),
+        Key::StudyFreeUntil => cfg.study_free_day_until.clone(),
+        Key::PlanNow => "press Enter".into(),
         Key::FocusMinutes => format!("{} min", cfg.focus_minutes),
         Key::BreakMinutes => format!("{} min", cfg.break_minutes),
         Key::Vault => cfg.vault.clone(),
@@ -169,10 +198,17 @@ pub fn help(key: Key) -> &'static str {
         Key::PhoneReplies => "Send a message to your ntfy topic to add tasks and events, tick things off, sync, or ask Claude. It works while the app is closed, if you're logged in. Anyone who knows the topic can do the same, so the first time this goes on you get a new private topic. Run lockin phone to scan it into your phone. It can't delete anything, submit to Moodle or read your files. Pressing Enter here switches it off when it's on.",
         Key::NtfyServer => "The server that delivers phone notifications. Change it only if you host your own.",
         Key::NtfyTopic => "Subscribe to this name in the ntfy app. Anyone who knows it can read your notifications, so keep it private.",
-        Key::Model => "The Claude model for the briefing and the Claude tab. Haiku uses the least of your usage, and Opus uses the most.",
+        Key::Model => "The Claude model for the briefing, study plans and phone replies. Haiku uses the least of your usage, and Opus uses the most.",
         Key::TutorModel => "The Claude model for the Chats tab. Opus handles harder math better, and uses more of your usage.",
         Key::TutorLanguage => "auto replies in the language you write in, and starts lessons in the material's language. Or always use English or Deutsch.",
         Key::AboutMe => "A short line Claude reads when planning, like your school and year. Leave it empty if you prefer.",
+        Key::StudyAuto => "The daily job plans study sessions when a new test appears. It plans each test once, so a session you delete stays deleted.",
+        Key::StudyLength => "How long each study session lasts, with a 15-minute break between sessions.",
+        Key::StudyPerDay => "The most study sessions on any one day, across all your tests.",
+        Key::StudyUntil => "On school days, sessions start 30 minutes after your last lesson and end by this time.",
+        Key::StudyFreeFrom => "Days without lessons, like weekends and holidays, start at this time.",
+        Key::StudyFreeUntil => "Days without lessons end by this time.",
+        Key::PlanNow => "Replaces planned sessions that are still ahead, and keeps any you've edited or moved. Press u in the app to undo it.",
         Key::FocusMinutes => "Default length of a focus session.",
         Key::BreakMinutes => "Default length of a break.",
         Key::Vault => "The folder shown in the Notes tab. Its contents are never sent to Claude.",
@@ -215,6 +251,12 @@ pub fn step(cfg: &mut Config, key: Key, dir: i64) {
             let i = MODELS.iter().position(|m| *m == cfg.tutor_model).unwrap_or(1) as i64;
             cfg.tutor_model = MODELS[(i + dir).rem_euclid(MODELS.len() as i64) as usize].into();
         }
+        Key::StudyAuto => cfg.study_auto_plan = !cfg.study_auto_plan,
+        Key::StudyLength => {
+            let i = STUDY_LENGTHS.iter().position(|m| *m == cfg.study_session_minutes).unwrap_or(2) as i64;
+            cfg.study_session_minutes = STUDY_LENGTHS[(i + dir).rem_euclid(STUDY_LENGTHS.len() as i64) as usize];
+        }
+        Key::StudyPerDay => cfg.study_max_per_day = (cfg.study_max_per_day + dir).clamp(1, 6),
         Key::FocusMinutes => cfg.focus_minutes = (cfg.focus_minutes + 5 * dir).clamp(5, 180),
         Key::BreakMinutes => cfg.break_minutes = (cfg.break_minutes + dir).clamp(1, 60),
         _ => {}
@@ -257,6 +299,18 @@ pub fn set_text(cfg: &mut Config, key: Key, text: &str) -> Result<()> {
                 bail!("Use a folder inside the vault, like LockIn");
             }
             cfg.new_note_dir = text.to_string();
+        }
+        Key::StudyUntil | Key::StudyFreeFrom | Key::StudyFreeUntil => {
+            let mut times = parse_times(text)?;
+            if times.len() != 1 {
+                bail!("Enter one time, like 20:00");
+            }
+            let time = times.remove(0);
+            match key {
+                Key::StudyUntil => cfg.study_until = time,
+                Key::StudyFreeFrom => cfg.study_free_day_from = time,
+                _ => cfg.study_free_day_until = time,
+            }
         }
         Key::AboutMe => cfg.about_me = text.to_string(),
         Key::Editor => {

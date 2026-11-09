@@ -1,6 +1,7 @@
 use crate::chats::{ChatsState, Level as ChatLevel};
 use crate::config::{config_path, db_path, find_bin, Config};
-use crate::db::{Briefing, Db, Event, Grade, Habit, InboxItem, Task};
+use crate::db::{Briefing, Db, Event, Habit, InboxItem, Lesson, Task};
+use crate::planner;
 use crate::files::{self, Browser, Entry, Preview, Sort, Yank};
 use crate::form::{self, Form, Target};
 use crate::services;
@@ -18,25 +19,23 @@ use std::time::Instant;
 pub enum View {
     Today,
     Tasks,
+    Week,
     Calendar,
     Notes,
     Habits,
-    Grades,
     Focus,
-    Claude,
     Chats,
     Settings,
 }
 
-pub const VIEWS: [(View, &str); 10] = [
+pub const VIEWS: [(View, &str); 9] = [
     (View::Today, "Today"),
     (View::Tasks, "Tasks"),
+    (View::Week, "Week"),
     (View::Calendar, "Calendar"),
     (View::Notes, "Notes"),
     (View::Habits, "Habits"),
-    (View::Grades, "Grades"),
     (View::Focus, "Focus"),
-    (View::Claude, "Claude"),
     (View::Chats, "Chats"),
     (View::Settings, "Settings"),
 ];
@@ -52,7 +51,6 @@ pub enum Prompt {
     Rename(PathBuf),
     VaultFind,
     NewHabit,
-    Chat,
     ChatTitle(Option<i64>),
     ChatAsk,
     BooksEmail,
@@ -100,6 +98,7 @@ enum Undo {
     Event(Event),
     RemoveEvent(i64),
     Move { from: PathBuf, to: PathBuf },
+    Plan { removed: Vec<Event>, added: Vec<i64> },
 }
 
 /// Things that take over the terminal for a while.
@@ -115,7 +114,7 @@ pub enum EditTarget {
 pub(crate) enum Bg {
     Sync(Result<String, String>),
     Brief(Result<String, String>),
-    Chat(Result<String, String>),
+    Plan(Result<planner::Outcome, String>),
     CoursePull(Result<String, String>),
     Chats(i64, Result<(), String>),
     Book(serde_json::Value),
@@ -146,6 +145,34 @@ impl AgendaItem {
             AgendaItem::Event(e) => &e.title,
         }
     }
+}
+
+#[derive(Clone)]
+pub enum WeekItem {
+    Lesson(Lesson),
+    Other(AgendaItem),
+}
+
+impl WeekItem {
+    pub fn start(&self) -> i64 {
+        match self {
+            WeekItem::Lesson(l) => l.start,
+            WeekItem::Other(i) => i.time(),
+        }
+    }
+    /// A deadline is a moment, so it shows as a short block.
+    pub fn end(&self) -> i64 {
+        match self {
+            WeekItem::Lesson(l) => l.end,
+            WeekItem::Other(AgendaItem::Event(e)) => e.end,
+            WeekItem::Other(AgendaItem::Task(t)) => t.due.unwrap_or(0) + 1800,
+        }
+    }
+}
+
+/// A planned session you edit becomes yours, so the next plan leaves it alone.
+fn kept_source(e: &Event) -> String {
+    if e.source == planner::SOURCE_STUDY { planner::SOURCE_STUDY_FIXED.to_string() } else { e.source.clone() }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -195,7 +222,6 @@ pub struct App {
     pub tasks: Vec<Task>,
     pub events: Vec<Event>,
     pub habits: Vec<Habit>,
-    pub grades: Vec<Grade>,
     pub inbox: Vec<InboxItem>,
     pub briefing: Option<Briefing>,
     pub notes: Vec<NoteEntry>,
@@ -206,13 +232,13 @@ pub struct App {
     pub sel_tasks: usize,
     pub sel_notes: usize,
     pub sel_habits: usize,
-    pub sel_grades: usize,
+    pub sel_week: usize,
+    pub planning: bool,
     pub sel_agenda: usize,
     pub habit_col: i64,
     pub cal_date: NaiveDate,
     pub filter: TaskFilter,
     pub show_done: bool,
-    pub show_past: bool,
     pub search: String,
     pub preview_scroll: u16,
     pub browser: Browser,
@@ -226,9 +252,6 @@ pub struct App {
     last_sync_try: Instant,
 
     pub focus: Option<Focus>,
-    pub chat: Vec<(bool, String)>,
-    pub chat_scroll: u16,
-    pub chat_busy: bool,
     pub syncing: bool,
     pub briefing_busy: bool,
     pub spinner: usize,
@@ -243,8 +266,8 @@ pub struct App {
 }
 
 const COMMANDS: &[&str] = &[
-    "add", "brief", "books", "calendar", "chats", "claude", "config", "daily", "event", "filter", "focus", "grades", "habit", "habits", "help", "learn", "moodle", "note",
-    "notes", "notify", "pdf", "q", "qa", "settings", "stop", "sync", "tasks", "today", "w", "wq",
+    "add", "brief", "books", "calendar", "chats", "config", "daily", "event", "filter", "focus", "habit", "habits", "help", "learn", "moodle", "note",
+    "notes", "notify", "pdf", "plan", "q", "qa", "settings", "stop", "sync", "tasks", "today", "w", "week", "wq",
 ];
 
 /// The module id in a Moodle assignment link, or `None` for anything that isn't an assignment.
@@ -290,7 +313,6 @@ impl App {
             tasks: vec![],
             events: vec![],
             habits: vec![],
-            grades: vec![],
             inbox: vec![],
             briefing: None,
             notes: vec![],
@@ -300,13 +322,13 @@ impl App {
             sel_tasks: 0,
             sel_notes: 0,
             sel_habits: 0,
-            sel_grades: 0,
+            sel_week: 0,
+            planning: false,
             sel_agenda: 0,
             habit_col: 0,
             cal_date: today(),
             filter: TaskFilter::All,
             show_done: false,
-            show_past: false,
             search: String::new(),
             preview_scroll: 0,
             browser,
@@ -319,9 +341,6 @@ impl App {
             timer_next: String::new(),
             last_sync_try: Instant::now(),
             focus: None,
-            chat: vec![],
-            chat_scroll: 0,
-            chat_busy: false,
             syncing: false,
             briefing_busy: false,
             spinner: 0,
@@ -342,7 +361,6 @@ impl App {
         self.tasks = self.db.tasks()?;
         self.events = self.db.events()?;
         self.habits = self.db.habits()?;
-        self.grades = self.db.grades()?;
         self.inbox = self.db.inbox()?;
         self.briefing = self.db.latest_briefing()?;
         self.focus_today = self.db.focus_minutes_today()?;
@@ -438,10 +456,6 @@ impl App {
         self.visible_entries().get(self.sel_notes).map(|e| (*e).clone())
     }
 
-    pub fn visible_grades(&self) -> Vec<&Grade> {
-        self.grades.iter().filter(|g| self.show_past || g.current).collect()
-    }
-
     pub fn agenda(&self, day: NaiveDate) -> Vec<AgendaItem> {
         let mut items: Vec<AgendaItem> = self
             .tasks
@@ -458,6 +472,10 @@ impl App {
         match self.view {
             View::Today => self.today_tasks().get(self.sel_today).map(|t| (*t).clone()),
             View::Tasks => self.visible_tasks().get(self.sel_tasks).map(|t| (*t).clone()),
+            View::Week => match self.selected_week_item() {
+                Some(WeekItem::Other(AgendaItem::Task(t))) => Some(t),
+                _ => None,
+            },
             View::Calendar => match self.agenda(self.cal_date).get(self.sel_agenda) {
                 Some(AgendaItem::Task(t)) => Some(t.clone()),
                 _ => None,
@@ -472,10 +490,9 @@ impl App {
             View::Tasks => self.visible_tasks().len(),
             View::Notes => self.visible_entries().len(),
             View::Habits => self.habits.len(),
-            View::Grades => self.visible_grades().len(),
             View::Settings => settings::ROWS.len(),
             View::Chats => self.chats_len(),
-            View::Calendar | View::Focus | View::Claude => 0,
+            View::Week | View::Calendar | View::Focus => 0,
         }
     }
 
@@ -485,10 +502,9 @@ impl App {
             View::Tasks => Some(&mut self.sel_tasks),
             View::Notes => Some(&mut self.sel_notes),
             View::Habits => Some(&mut self.sel_habits),
-            View::Grades => Some(&mut self.sel_grades),
             View::Settings => Some(&mut self.sel_settings),
             View::Chats => self.chats_sel_mut(),
-            View::Calendar | View::Focus | View::Claude => None,
+            View::Week | View::Calendar | View::Focus => None,
         }
     }
 
@@ -498,7 +514,6 @@ impl App {
         self.sel_tasks = self.sel_tasks.min(last(self.visible_tasks().len()));
         self.sel_notes = self.sel_notes.min(last(self.visible_entries().len()));
         self.sel_habits = self.sel_habits.min(last(self.habits.len()));
-        self.sel_grades = self.sel_grades.min(last(self.visible_grades().len()));
         self.sel_agenda = self.sel_agenda.min(last(self.agenda(self.cal_date).len()));
         self.clamp_chats();
     }
@@ -589,13 +604,12 @@ impl App {
                 }
             }
             Bg::Book(event) => self.on_book_event(event),
-            Bg::Chat(r) => {
-                self.chat_busy = false;
+            Bg::Plan(r) => {
+                self.planning = false;
                 match r {
-                    Ok(answer) => self.chat.push((false, answer)),
-                    Err(e) => self.chat.push((false, format!("Error: {e}"))),
+                    Ok(outcome) => self.finish_plan(outcome),
+                    Err(e) => self.error(format!("Planning failed: {e}")),
                 }
-                self.chat_scroll = 0;
             }
         }
         self.refresh();
@@ -679,7 +693,14 @@ impl App {
             let r = (|| -> Result<String> {
                 let mut db = Db::open(&db_path())?;
                 let s = services::sync(&mut db)?;
-                Ok(format!("Moodle synced: {} new, {} updated, {} finished", s.added, s.updated, s.completed))
+                let mut text = format!("Moodle synced: {} new, {} updated, {} finished", s.added, s.updated, s.completed);
+                // A failed timetable shouldn't hide that Moodle worked.
+                match services::sync_untis(&mut db) {
+                    Ok(Some(summary)) => text += &format!(". Untis: {summary}"),
+                    Ok(None) => {}
+                    Err(e) => text += &format!(". {e}"),
+                }
+                Ok(text)
             })();
             let _ = tx.send(Bg::Sync(r.map_err(|e| e.to_string())));
         });
@@ -698,20 +719,6 @@ impl App {
                 Ok(services::brief(&db, &cfg)?.headline)
             })();
             let _ = tx.send(Bg::Brief(r.map_err(|e| e.to_string())));
-        });
-    }
-
-    fn send_chat(&mut self, text: String) {
-        self.chat.push((true, text));
-        self.chat_busy = true;
-        self.chat_scroll = 0;
-        let (tx, cfg, transcript) = (self.tx.clone(), self.cfg.clone(), self.chat.clone());
-        std::thread::spawn(move || {
-            let r = (|| -> Result<String> {
-                let db = Db::open(&db_path())?;
-                services::chat(&db, &cfg, &transcript)
-            })();
-            let _ = tx.send(Bg::Chat(r.map_err(|e| e.to_string())));
         });
     }
 
@@ -939,11 +946,6 @@ impl App {
                 Ok(())
             }
             Prompt::VaultFind => self.open_find_result(),
-            Prompt::Chat if text.is_empty() => Ok(()),
-            Prompt::Chat => {
-                self.send_chat(text);
-                Ok(())
-            }
             Prompt::ChatTitle(id) => self.create_or_rename_chat(id, &text),
             Prompt::ChatAsk if text.is_empty() => Ok(()),
             Prompt::ChatAsk => self.ask_chat(text),
@@ -1211,8 +1213,8 @@ impl App {
             "moodle" => self.want_editor = Some(EditTarget::MoodleApp),
             "notes" => self.switch(View::Notes),
             "habits" => self.switch(View::Habits),
-            "grades" => self.switch(View::Grades),
-            "claude" => self.switch(View::Claude),
+            "week" => self.switch(View::Week),
+            "plan" => self.start_plan(),
             "chats" => self.switch(View::Chats),
             "books" => {
                 self.switch(View::Chats);
@@ -1342,6 +1344,12 @@ impl App {
         if self.view == View::Calendar && c == 'd' {
             return self.ask_delete_agenda();
         }
+        if self.view == View::Week && c == 'd' {
+            if self.point_agenda_at_week_item() {
+                self.ask_delete_agenda();
+            }
+            return;
+        }
         if self.view == View::Chats && c == 'd' {
             return self.chats_delete();
         }
@@ -1392,7 +1400,7 @@ impl App {
 
     fn half_page(&mut self, dir: isize) {
         match self.view {
-            View::Claude => self.chat_scroll = if dir > 0 { self.chat_scroll.saturating_sub(10) } else { self.chat_scroll.saturating_add(10) },
+            View::Week => self.week_step(dir as i64),
             View::Chats if self.chats.level == ChatLevel::Chat => {
                 self.chats.scroll = if dir > 0 { self.chats.scroll.saturating_sub(10) } else { self.chats.scroll.saturating_add(10) }
             }
@@ -1403,7 +1411,7 @@ impl App {
     fn on_chord(&mut self, prefix: char, c: char, n: Option<usize>) {
         match (prefix, c) {
             ('g', 'g') => match self.view {
-                View::Claude => self.chat_scroll = u16::MAX,
+                View::Week => self.sel_week = 0,
                 View::Chats if self.chats.level == ChatLevel::Chat => self.chats.scroll = u16::MAX,
                 _ => self.set_sel(n.map_or(0, |v| v.saturating_sub(1))),
             },
@@ -1422,24 +1430,14 @@ impl App {
                 let state = if self.show_done { "shown" } else { "hidden" };
                 self.info(format!("Finished tasks {state}"));
             }
-            ('z', 'p') => {
-                self.show_past = !self.show_past;
-                self.clamp();
-                let state = if self.show_past { "shown" } else { "hidden" };
-                self.info(format!("Past courses {state}"));
-            }
             ('Z', 'Z') | ('Z', 'Q') => self.try_quit(false),
             (' ', 't') => self.switch(View::Today),
             (' ', 'T') => self.switch(View::Tasks),
             (' ', 'c') => self.switch(View::Calendar),
             (' ', 'n') => self.switch(View::Notes),
             (' ', 'h') => self.switch(View::Habits),
-            (' ', 'g') => self.switch(View::Grades),
+            (' ', 'w') => self.switch(View::Week),
             (' ', 'p') => self.switch(View::Focus),
-            (' ', 'a') => {
-                self.switch(View::Claude);
-                self.open_prompt(Prompt::Chat, "");
-            }
             (' ', 'f') => {
                 self.switch(View::Notes);
                 self.find_sel = 0;
@@ -1490,7 +1488,7 @@ impl App {
             View::Notes => self.open_entry(),
             View::Chats => self.chats_enter(),
             View::Settings => self.activate_setting(),
-            View::Claude => self.open_prompt(Prompt::Chat, ""),
+            View::Week => self.week_enter(),
             _ => {}
         }
     }
@@ -1499,7 +1497,7 @@ impl App {
         match self.view {
             View::Calendar => return self.on_calendar_key(c, times),
             View::Focus => return self.on_focus_key(c),
-            View::Claude => return self.on_claude_key(c, times),
+            View::Week => return self.on_week_key(c, times),
             View::Habits => {
                 if self.on_habit_key(c) {
                     return;
@@ -1593,11 +1591,11 @@ impl App {
     fn delete_current(&mut self) {
         match self.view {
             View::Today | View::Tasks => self.delete_task_current(),
-            View::Calendar => match self.agenda(self.cal_date).get(self.sel_agenda).cloned() {
+            View::Week | View::Calendar => match self.agenda(self.cal_date).get(self.sel_agenda).cloned() {
                 Some(AgendaItem::Task(_)) => self.delete_task_current(),
                 Some(AgendaItem::Event(e)) => {
-                    if e.source == "moodle" {
-                        return self.info("This event comes from Moodle and would return on the next sync");
+                    if e.is_readonly() {
+                        return self.info("This comes from Moodle or Untis, and would return on the next sync");
                     }
                     self.undo.push(Undo::Event(e.clone()));
                     let r = self.db.delete_event(e.id);
@@ -1635,6 +1633,15 @@ impl App {
             Undo::RemoveTask(id) => self.db.delete_task(id),
             Undo::Event(e) => self.db.put_event(&e),
             Undo::RemoveEvent(id) => self.db.delete_event(id),
+            Undo::Plan { removed, added } => (|| {
+                for id in &added {
+                    self.db.delete_event(*id)?;
+                }
+                for e in &removed {
+                    self.db.put_event(e)?;
+                }
+                Ok(())
+            })(),
             Undo::Move { from, to } => {
                 let moved = if to.exists() {
                     Err(anyhow::anyhow!("{} already exists", to.display()))
@@ -1727,7 +1734,7 @@ impl App {
             None => self.open_form(Form::new_event(self.cal_date)),
             Some(AgendaItem::Task(t)) if t.is_moodle() => self.open_in_moodle(&t),
             Some(AgendaItem::Task(t)) => self.open_form(Form::edit_task(&t, self.cal_date)),
-            Some(AgendaItem::Event(e)) if e.source == "moodle" => self.info("This event comes from Moodle, so change it there"),
+            Some(AgendaItem::Event(e)) if e.is_readonly() => self.info("This comes from Moodle or Untis, so change it there"),
             Some(AgendaItem::Event(e)) => self.open_form(Form::edit_event(&e)),
         }
     }
@@ -1736,7 +1743,7 @@ impl App {
         match self.selected_agenda() {
             None => self.info("Nothing to delete on this day"),
             Some(AgendaItem::Task(t)) if t.is_moodle() => self.info("Moodle tasks can't be deleted. Press x to mark it done here"),
-            Some(AgendaItem::Event(e)) if e.source == "moodle" => self.info("This event comes from Moodle and would return on the next sync"),
+            Some(AgendaItem::Event(e)) if e.is_readonly() => self.info("This comes from Moodle or Untis, and would return on the next sync"),
             Some(item) => self.mode = Mode::Confirm(Confirm::DeleteAgenda(item.title().to_string())),
         }
     }
@@ -1755,7 +1762,7 @@ impl App {
         let (r, target, new_time) = match self.selected_agenda() {
             None => return self.info("Nothing selected on this day"),
             Some(AgendaItem::Task(t)) if t.is_moodle() => return self.info("Moodle deadlines sync from Moodle, so they can't be moved"),
-            Some(AgendaItem::Event(e)) if e.source == "moodle" => return self.info("This event comes from Moodle, so change it there"),
+            Some(AgendaItem::Event(e)) if e.is_readonly() => return self.info("This comes from Moodle or Untis, so change it there"),
             Some(AgendaItem::Task(t)) => {
                 let due = form::shift_days(t.due.unwrap_or_else(now_ts), days);
                 self.undo.push(Undo::Task(t.clone()));
@@ -1763,7 +1770,7 @@ impl App {
             }
             Some(AgendaItem::Event(e)) => {
                 let start = form::shift_days(e.start, days);
-                let moved = Event { start, end: start + (e.end - e.start), ..e.clone() };
+                let moved = Event { start, end: start + (e.end - e.start), source: kept_source(&e), ..e.clone() };
                 self.undo.push(Undo::Event(e));
                 (self.db.put_event(&moved), Target::Event(Some(moved.id)), start)
             }
@@ -1836,7 +1843,7 @@ impl App {
             }
             Target::Event(Some(id)) => {
                 let Some(old) = self.events.iter().find(|e| e.id == id).cloned() else { bail!("That event no longer exists") };
-                let saved = Event { title: p.title.clone(), start: p.start, end: p.end, location: p.location.clone(), notes: p.notes.clone(), ..old.clone() };
+                let saved = Event { title: p.title.clone(), start: p.start, end: p.end, location: p.location.clone(), notes: p.notes.clone(), source: kept_source(&old), ..old.clone() };
                 self.db.put_event(&saved)?;
                 self.undo.push(Undo::Event(old));
                 Ok(target)
@@ -1936,6 +1943,126 @@ impl App {
         true
     }
 
+    // ---- week planner -----------------------------------------------------
+
+    pub fn week_start(&self) -> NaiveDate {
+        self.cal_date - Duration::days(self.cal_date.weekday().num_days_from_monday() as i64)
+    }
+
+    /// Everything on a day in time order: lessons with double periods joined, then your own things.
+    pub fn week_items(&self, day: NaiveDate) -> Vec<WeekItem> {
+        let lessons = self.db.lessons_on(day).unwrap_or_default();
+        let mut items: Vec<WeekItem> = planner::merge_lessons(&lessons).into_iter().map(WeekItem::Lesson).collect();
+        items.extend(self.agenda(day).into_iter().map(WeekItem::Other));
+        items.sort_by_key(WeekItem::start);
+        items
+    }
+
+    pub fn selected_week_item(&self) -> Option<WeekItem> {
+        self.week_items(self.cal_date).get(self.sel_week).cloned()
+    }
+
+    /// Calendar actions work on the agenda, so this lines it up with the Week tab's selection.
+    /// Returns false when a lesson is selected, because lessons belong to Untis.
+    fn point_agenda_at_week_item(&mut self) -> bool {
+        match self.selected_week_item() {
+            Some(WeekItem::Lesson(_)) => {
+                self.info("Lessons come from Untis, so they can't be changed here");
+                false
+            }
+            Some(WeekItem::Other(item)) => {
+                let wanted = item.time();
+                let title = item.title().to_string();
+                self.sel_agenda = self.agenda(self.cal_date).iter().position(|i| i.time() == wanted && i.title() == title).unwrap_or(0);
+                true
+            }
+            None => {
+                self.sel_agenda = usize::MAX;
+                true
+            }
+        }
+    }
+
+    fn week_enter(&mut self) {
+        if self.point_agenda_at_week_item() {
+            self.edit_agenda();
+        }
+    }
+
+    fn week_step(&mut self, weeks: i64) {
+        self.cal_date += Duration::weeks(weeks);
+        self.sel_week = 0;
+    }
+
+    fn on_week_key(&mut self, c: char, times: isize) {
+        let n = times.max(1);
+        match c {
+            'h' => {
+                self.cal_date -= Duration::days(n as i64);
+                self.sel_week = 0;
+            }
+            'l' => {
+                self.cal_date += Duration::days(n as i64);
+                self.sel_week = 0;
+            }
+            'j' => {
+                let last = self.week_items(self.cal_date).len().saturating_sub(1);
+                self.sel_week = (self.sel_week + n as usize).min(last);
+            }
+            'k' => self.sel_week = self.sel_week.saturating_sub(n as usize),
+            'G' => self.sel_week = self.week_items(self.cal_date).len().saturating_sub(1),
+            'H' | '[' => self.week_step(-(n as i64)),
+            'L' | ']' => self.week_step(n as i64),
+            't' => {
+                self.cal_date = today();
+                self.sel_week = 0;
+            }
+            'o' => self.open_form(Form::new_event(self.cal_date)),
+            'a' => self.open_form(Form::new_task(self.cal_date)),
+            'e' | 'i' => self.week_enter(),
+            '+' | '=' | '-' => {
+                if self.point_agenda_at_week_item() {
+                    self.shift_agenda(if c == '-' { -(n as i64) } else { n as i64 });
+                    self.sel_week = 0;
+                }
+            }
+            'x' => self.toggle_current(),
+            'p' => self.start_plan(),
+            's' => self.start_sync(),
+            _ => {}
+        }
+    }
+
+    pub fn start_plan(&mut self) {
+        if self.planning {
+            return self.info("Already planning");
+        }
+        // Tests must never start a real, billed Claude request, so they use the plain plan.
+        if cfg!(test) {
+            let r = planner::plan(&self.db, &self.cfg, planner::Mode::Replan, false);
+            match r {
+                Ok(outcome) => self.finish_plan(outcome),
+                Err(e) => self.error(e.to_string()),
+            }
+            return self.refresh();
+        }
+        self.planning = true;
+        self.info("Planning your study sessions…");
+        let (tx, cfg) = (self.tx.clone(), self.cfg.clone());
+        std::thread::spawn(move || {
+            let r = Db::open(&db_path()).and_then(|db| planner::plan(&db, &cfg, planner::Mode::Replan, true));
+            let _ = tx.send(Bg::Plan(r.map_err(|e| e.to_string())));
+        });
+    }
+
+    fn finish_plan(&mut self, outcome: planner::Outcome) {
+        let message = outcome.summary();
+        let added = outcome.added.iter().map(|e| e.id).collect();
+        self.undo.push(Undo::Plan { removed: outcome.removed, added });
+        let press = if outcome.added.is_empty() { "" } else { ". Press u to undo" };
+        self.info(format!("{message}{press}"));
+    }
+
     // ---- settings ---------------------------------------------------------
 
     fn current_setting(&self) -> settings::Key {
@@ -1991,6 +2118,7 @@ impl App {
                     let r = self.run_command("notify");
                     self.attempt(r);
                 }
+                PlanNow => self.start_plan(),
                 EditFile => self.want_editor = Some(EditTarget::Config),
                 ForgetBooksPassword => self.forget_books_password(),
                 _ => {}
@@ -2052,21 +2180,6 @@ impl App {
             _ => return false,
         }
         true
-    }
-
-    fn on_claude_key(&mut self, c: char, times: isize) {
-        match c {
-            'i' | 'a' | 'o' => self.open_prompt(Prompt::Chat, ""),
-            'j' => self.chat_scroll = self.chat_scroll.saturating_sub(times.max(1) as u16),
-            'k' => self.chat_scroll = self.chat_scroll.saturating_add(times.max(1) as u16),
-            'G' => self.chat_scroll = 0,
-            'c' => {
-                self.chat.clear();
-                self.chat_scroll = 0;
-                self.info("Chat cleared");
-            }
-            _ => {}
-        }
     }
 
     // ---- focus ------------------------------------------------------------

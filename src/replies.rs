@@ -397,7 +397,6 @@ mod tests {
             window_from: 0,
             tasks: vec![crate::db::RemoteTask { ext_id: "m".into(), title: "HW".into(), course: "AM".into(), due: crate::timeutil::now_ts() + 99, url: String::new(), action: String::new(), notes: String::new() }],
             events: vec![],
-            grades: vec![],
             inbox: vec![],
         };
         d.apply_snapshot(&snapshot).unwrap();

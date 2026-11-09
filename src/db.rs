@@ -21,8 +21,10 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE TABLE IF NOT EXISTS habits(id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS habit_log(
   habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE, day TEXT NOT NULL, PRIMARY KEY(habit_id, day));
-CREATE TABLE IF NOT EXISTS grades(
-  course_id INTEGER PRIMARY KEY, course TEXT NOT NULL, grade TEXT NOT NULL, current INTEGER NOT NULL, items TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS lessons(
+  id INTEGER PRIMARY KEY, subject TEXT NOT NULL, subject_long TEXT NOT NULL DEFAULT '', teacher TEXT NOT NULL DEFAULT '',
+  room TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'normal', kind TEXT NOT NULL DEFAULT '', start INTEGER NOT NULL, end INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS lessons_start ON lessons(start);
 CREATE TABLE IF NOT EXISTS focus(
   id INTEGER PRIMARY KEY, task_id INTEGER, title TEXT NOT NULL, finished_at INTEGER NOT NULL, minutes INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS briefings(id INTEGER PRIMARY KEY, created_at INTEGER NOT NULL, headline TEXT NOT NULL, plan TEXT NOT NULL);
@@ -101,6 +103,16 @@ pub struct Event {
     pub course: String,
 }
 
+impl Event {
+    /// Moodle and Untis own their events, so a change here would only come back on the next sync.
+    pub fn is_readonly(&self) -> bool {
+        self.source == "moodle" || self.source == crate::planner::SOURCE_UNTIS
+    }
+    pub fn is_study(&self) -> bool {
+        self.source == crate::planner::SOURCE_STUDY || self.source == crate::planner::SOURCE_STUDY_FIXED
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Habit {
     pub id: i64,
@@ -124,22 +136,17 @@ impl Habit {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct GradeItem {
-    pub name: String,
-    pub grade: String,
-    pub range: String,
-    pub pct: String,
-    pub feedback: String,
-    pub total: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct Grade {
-    pub course: String,
-    pub grade: String,
-    pub current: bool,
-    pub items: Vec<GradeItem>,
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Lesson {
+    pub id: i64,
+    pub subject: String,
+    pub subject_long: String,
+    pub teacher: String,
+    pub room: String,
+    pub status: String,
+    pub kind: String,
+    pub start: i64,
+    pub end: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -179,20 +186,10 @@ pub struct RemoteEvent {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct RemoteGrade {
-    pub course_id: i64,
-    pub course: String,
-    pub grade: String,
-    pub current: bool,
-    pub items: Vec<GradeItem>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct Snapshot {
     pub window_from: i64,
     pub tasks: Vec<RemoteTask>,
     pub events: Vec<RemoteEvent>,
-    pub grades: Vec<RemoteGrade>,
     pub inbox: Vec<InboxItem>,
 }
 
@@ -210,6 +207,7 @@ pub struct Db {
 /// Lessons from before teach mode existed keep teaching, and plain chats stay plain.
 fn migrate(c: &Connection) -> Result<()> {
     let has_teach: i64 = c.query_row("SELECT count(*) FROM pragma_table_info('tutor_sessions') WHERE name='teach'", [], |r| r.get(0))?;
+    c.execute_batch("DROP TABLE IF EXISTS grades;")?;
     if has_teach == 0 {
         c.execute_batch(
             "BEGIN;
@@ -385,20 +383,72 @@ impl Db {
 
     // ---- misc -------------------------------------------------------------
 
-    pub fn grades(&self) -> Result<Vec<Grade>> {
-        let mut st = self.c.prepare("SELECT course,grade,current,items FROM grades ORDER BY current DESC, course")?;
+    /// Replaces the timetable between two times with what Untis just sent.
+    pub fn replace_lessons(&mut self, from: i64, to: i64, lessons: &[Lesson]) -> Result<()> {
+        let tx = self.c.transaction()?;
+        tx.execute("DELETE FROM lessons WHERE start>=?1 AND start<?2", params![from, to])?;
+        for l in lessons {
+            tx.execute(
+                "INSERT OR REPLACE INTO lessons(id,subject,subject_long,teacher,room,status,kind,start,end) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![l.id, l.subject, l.subject_long, l.teacher, l.room, l.status, l.kind, l.start, l.end],
+            )?;
+        }
+        tx.execute("DELETE FROM lessons WHERE start<?1", [now_ts() - 90 * 86400])?;
+        tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('lessons_until',?1)", [to.to_string()])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn lessons_on(&self, day: NaiveDate) -> Result<Vec<Lesson>> {
+        let start = crate::timeutil::ts_of(day, chrono::NaiveTime::MIN);
+        let end = crate::timeutil::ts_of(day + Duration::days(1), chrono::NaiveTime::MIN);
+        let mut st = self.c.prepare("SELECT id,subject,subject_long,teacher,room,status,kind,start,end FROM lessons WHERE start>=?1 AND start<?2 ORDER BY start,id")?;
         let rows = st
-            .query_map([], |r| {
-                let items: String = r.get(3)?;
-                Ok(Grade {
-                    course: r.get(0)?,
-                    grade: r.get(1)?,
-                    current: r.get(2)?,
-                    items: serde_json::from_str(&items).unwrap_or_default(),
-                })
+            .query_map([start, end], |r| {
+                Ok(Lesson { id: r.get(0)?, subject: r.get(1)?, subject_long: r.get(2)?, teacher: r.get(3)?, room: r.get(4)?, status: r.get(5)?, kind: r.get(6)?, start: r.get(7)?, end: r.get(8)? })
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows)
+    }
+
+    /// The end of the fetched timetable. Past this, an empty school day just means "not known yet".
+    pub fn lessons_end(&self) -> Option<i64> {
+        self.meta("lessons_until").and_then(|v| v.parse::<i64>().ok()).map(|t| t - 1)
+    }
+
+    /// Saves exams from Untis as read-only events. One that disappeared or moved is removed.
+    pub fn apply_exams(&mut self, exams: &[RemoteEvent]) -> Result<()> {
+        let now = now_ts();
+        let tx = self.c.transaction()?;
+        let seen: HashSet<&str> = exams.iter().map(|e| e.ext_id.as_str()).collect();
+        let stale: Vec<(i64, String)> = {
+            let mut st = tx.prepare("SELECT id,ext_id FROM events WHERE source='untis' AND start>=?1")?;
+            let rows = st.query_map([now], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        for (id, ext) in stale {
+            if !seen.contains(ext.as_str()) {
+                tx.execute("DELETE FROM events WHERE id=?1", [id])?;
+            }
+        }
+        for e in exams {
+            tx.execute(
+                "INSERT INTO events(title,start,end,location,notes,source,ext_id,course) VALUES(?1,?2,?3,?4,?5,'untis',?6,?7)
+                 ON CONFLICT(ext_id) DO UPDATE SET title=excluded.title,start=excluded.start,end=excluded.end,
+                 location=excluded.location,notes=excluded.notes,course=excluded.course",
+                params![e.title, e.start, e.end, e.location, e.notes, e.ext_id, e.course],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn insert_event(&self, e: &Event) -> Result<i64> {
+        self.c.execute(
+            "INSERT INTO events(title,start,end,location,notes,source,ext_id,course) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![e.title, e.start, e.end, e.location, e.notes, e.source, e.ext_id, e.course],
+        )?;
+        Ok(self.c.last_insert_rowid())
     }
 
     pub fn inbox(&self) -> Result<Vec<InboxItem>> {
@@ -513,13 +563,6 @@ impl Db {
             )?;
         }
 
-        tx.execute("DELETE FROM grades", [])?;
-        for g in &s.grades {
-            tx.execute(
-                "INSERT INTO grades(course_id,course,grade,current,items) VALUES(?1,?2,?3,?4,?5)",
-                params![g.course_id, g.course, g.grade, g.current, serde_json::to_string(&g.items)?],
-            )?;
-        }
         tx.execute("DELETE FROM inbox", [])?;
         for n in &s.inbox {
             tx.execute("INSERT INTO inbox(subject,message,time) VALUES(?1,?2,?3)", params![n.subject, n.message, n.time])?;
@@ -554,7 +597,7 @@ mod tests {
     }
 
     fn snap(tasks: Vec<RemoteTask>, window_from: i64) -> Snapshot {
-        Snapshot { window_from, tasks, events: vec![], grades: vec![], inbox: vec![] }
+        Snapshot { window_from, tasks, events: vec![], inbox: vec![] }
     }
 
     #[test]
@@ -627,6 +670,29 @@ mod tests {
         for ext in ["", "-wal", "-shm"] {
             std::fs::remove_file(format!("{}{ext}", path.display())).ok();
         }
+    }
+
+    #[test]
+    fn untis_data_refreshes_without_touching_your_own_events() {
+        let mut d = db();
+        let now = now_ts();
+        let mine = d.add_event("Mine", now + 7200, now + 9000).unwrap();
+        let exam = |id: &str| RemoteEvent { ext_id: id.into(), title: "Test".into(), course: "0AM".into(), start: now + 3600, end: now + 7200, location: String::new(), notes: "Test".into() };
+        d.apply_exams(&[exam("untis:a"), exam("untis:b")]).unwrap();
+        assert_eq!(d.events().unwrap().len(), 3);
+        d.apply_exams(&[exam("untis:b")]).unwrap();
+        let events = d.events().unwrap();
+        assert!(events.iter().any(|e| e.id == mine), "your event stays");
+        assert!(!events.iter().any(|e| e.ext_id.as_deref() == Some("untis:a")), "a removed exam goes");
+        assert!(events.iter().find(|e| e.ext_id.as_deref() == Some("untis:b")).unwrap().is_readonly());
+
+        let lesson = |id: i64, start: i64| Lesson { id, subject: "AM".into(), start, end: start + 3000, ..Default::default() };
+        let (a, b) = (now + 100, now + 200);
+        d.replace_lessons(now, now + 1000, &[lesson(1, a), lesson(2, b)]).unwrap();
+        d.replace_lessons(now, now + 1000, &[lesson(2, b)]).unwrap();
+        let today_lessons = d.lessons_on(crate::timeutil::date_of(b)).unwrap();
+        assert_eq!(today_lessons.iter().map(|l| l.id).collect::<Vec<_>>(), vec![2], "a dropped lesson goes");
+        assert_eq!(d.lessons_end(), Some(now + 999));
     }
 
     #[test]

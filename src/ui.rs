@@ -1,12 +1,12 @@
 use crate::app::*;
 use crate::chats::{BookRow, Level as ChatLevel};
-use crate::db::{Grade, Task};
+use crate::db::{Event, Task};
 use crate::files::{human_size, Entry, Preview, Sort};
 use crate::form::Target;
 use crate::settings::{self, Kind};
 use crate::tutor::{self, Material, Role};
 use crate::timeutil::{date_of, fmt_abs, fmt_rel, local, now_ts, today};
-use chrono::{Datelike, Duration, Local};
+use chrono::{Datelike, Duration, Local, Timelike};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -81,9 +81,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::Calendar => draw_calendar(f, app, body),
         View::Notes => draw_notes(f, app, body),
         View::Habits => draw_habits(f, app, body),
-        View::Grades => draw_grades(f, app, body),
         View::Focus => draw_focus(f, app, body),
-        View::Claude => draw_claude(f, app, body),
+        View::Week => draw_week(f, app, body),
         View::Chats => draw_chats(f, app, body),
         View::Settings => draw_settings(f, app, body),
     }
@@ -157,7 +156,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if app.chats.listing {
         right.push(Span::styled(format!("{spin} digi4school  "), st(BLUE)));
     }
-    if app.briefing_busy || app.chat_busy || !app.chats.busy.is_empty() {
+    if app.planning {
+        right.push(Span::styled(format!("{spin} planning  "), st(ORANGE)));
+    }
+    if app.briefing_busy || !app.chats.busy.is_empty() {
         right.push(Span::styled(format!("{spin} claude  "), st(ORANGE)));
     }
     let now = now_ts();
@@ -194,7 +196,6 @@ fn prompt_label(p: &Prompt) -> &'static str {
         Prompt::VaultFind => "find in vault (↑ ↓ pick, Enter opens): ",
         Prompt::Setting(_) => "value: ",
         Prompt::NewHabit => "new habit: ",
-        Prompt::Chat => "ask claude: ",
         Prompt::ChatTitle(_) => "chat name (optional): ",
         Prompt::ChatAsk => "ask claude: ",
         Prompt::BooksEmail => "digi4school email: ",
@@ -602,6 +603,190 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Tests in red and study sessions in terracotta, here and on the month calendar.
+fn event_color(e: &Event) -> Color {
+    if e.source == crate::planner::SOURCE_UNTIS {
+        RED
+    } else if e.is_study() {
+        ORANGE
+    } else {
+        GREEN
+    }
+}
+
+fn week_item_style(item: &WeekItem) -> (Color, Color, String) {
+    match item {
+        WeekItem::Lesson(l) => {
+            let name = crate::planner::clean_subject(&l.subject);
+            match l.status.as_str() {
+                "cancelled" => (DIM, BG, format!("✗ {name}")),
+                "changed" => (BG, YELLOW, format!("{name} {}", l.room)),
+                _ => (FG, SEL, format!("{name} {}", l.room)),
+            }
+        }
+        WeekItem::Other(AgendaItem::Event(e)) => (BG, event_color(e), e.title.clone()),
+        WeekItem::Other(AgendaItem::Task(t)) => (if t.is_moodle() { BLUE } else { ORANGE }, BG, format!("◆ {}", t.title)),
+    }
+}
+
+fn draw_week(f: &mut Frame, app: &App, area: Rect) {
+    let (grid_area, side) = if area.width >= 120 {
+        let [a, b] = Layout::horizontal([Constraint::Min(70), Constraint::Length(36)]).areas(area);
+        (a, Some(b))
+    } else {
+        (area, None)
+    };
+    if grid_area.width < 60 || grid_area.height < 10 {
+        draw_week_day_list(f, app, grid_area);
+    } else {
+        draw_week_grid(f, app, grid_area);
+    }
+    if let Some(side) = side {
+        draw_week_side(f, app, side);
+    }
+}
+
+fn draw_week_grid(f: &mut Frame, app: &App, area: Rect) {
+    let monday = app.week_start();
+    let week: Vec<(chrono::NaiveDate, Vec<WeekItem>)> = (0..7).map(|i| monday + Duration::days(i)).map(|d| (d, app.week_items(d))).collect();
+    // The grid covers the usual school day, and stretches if something falls outside it.
+    let minutes = |ts: i64| {
+        let at = local(ts);
+        at.hour() as i64 * 60 + at.minute() as i64
+    };
+    let all = || week.iter().flat_map(|(_, items)| items.iter());
+    let from = all().map(|i| minutes(i.start())).min().unwrap_or(480).min(480) / 60 * 60;
+    let to = (all().map(|i| minutes(i.end().min(i.start() + 86399))).max().unwrap_or(1200).max(1200) + 59) / 60 * 60;
+
+    let [title, header, body] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let sunday = monday + Duration::days(6);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" Week {}  ", monday.iso_week().week()), st(ORANGE).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} – {}", monday.format("%d %b"), sunday.format("%d %b %Y")), st(MUTED)),
+        ])),
+        title,
+    );
+    const AXIS: u16 = 6;
+    let col_w = (body.width.saturating_sub(AXIS)) / 7;
+    let rows = body.height as i64;
+    let span = (to - from).max(60);
+    let row_of = |m: i64| ((m - from) * rows / span).clamp(0, rows - 1) as u16;
+    let mut hour = from;
+    while hour < to {
+        let y = body.y + row_of(hour);
+        f.render_widget(Paragraph::new(Span::styled(format!("{:02}:00", hour / 60), st(DIM))), Rect { x: body.x, y, width: AXIS, height: 1 });
+        hour += 60;
+    }
+    for (i, (day, items)) in week.iter().enumerate() {
+        let x = body.x + AXIS + i as u16 * col_w;
+        let is_today = *day == today();
+        let is_sel = *day == app.cal_date;
+        let style = if is_today {
+            Style::default().fg(BG).bg(ORANGE).add_modifier(Modifier::BOLD)
+        } else if is_sel {
+            st(FG).bg(SEL).add_modifier(Modifier::BOLD)
+        } else {
+            st(MUTED)
+        };
+        f.render_widget(Paragraph::new(Span::styled(fit(&day.format("%a %d").to_string(), col_w.saturating_sub(1) as usize), style)), Rect { x, y: header.y, width: col_w, height: 1 });
+        let width = col_w.saturating_sub(1);
+        for (n, item) in items.iter().enumerate() {
+            let y1 = row_of(minutes(item.start()));
+            let end_minute = minutes(item.end().min(item.start() + 86399)).max(minutes(item.start()) + 1);
+            let y2 = row_of(end_minute).max(y1 + 1);
+            let (fg, bg, label) = week_item_style(item);
+            let selected = is_sel && n == app.sel_week;
+            let style = if selected { Style::default().fg(BG).bg(FG).add_modifier(Modifier::BOLD) } else { Style::default().fg(fg).bg(bg) };
+            let rect = Rect { x, y: body.y + y1, width, height: (y2 - y1).min(rows as u16 - y1) };
+            let mut lines = vec![Line::from(Span::styled(fit(&label, width as usize), style))];
+            if rect.height >= 2 {
+                lines.push(Line::from(Span::styled(fit(&format!("{}", local(item.start()).format("%H:%M")), width as usize), style)));
+            }
+            f.render_widget(Paragraph::new(lines).style(style), rect);
+        }
+    }
+}
+
+fn week_item_lines<'a>(item: &WeekItem) -> Vec<Line<'a>> {
+    let times = |a: i64, b: i64| format!("{} {}–{}", local(a).format("%a %d %b"), local(a).format("%H:%M"), local(b).format("%H:%M"));
+    let mut lines = Vec::new();
+    match item {
+        WeekItem::Lesson(l) => {
+            let name = if l.subject_long.is_empty() { crate::planner::clean_subject(&l.subject) } else { format!("{} · {}", crate::planner::clean_subject(&l.subject), l.subject_long) };
+            lines.push(Line::from(Span::styled(name, st(FG).add_modifier(Modifier::BOLD))));
+            lines.push(Line::from(Span::styled(times(l.start, l.end), st(MUTED))));
+            let place = [l.room.as_str(), l.teacher.as_str()].iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(" · ");
+            if !place.is_empty() {
+                lines.push(Line::from(Span::styled(place, st(MUTED))));
+            }
+            match l.status.as_str() {
+                "cancelled" => lines.push(Line::from(Span::styled("Cancelled", st(RED)))),
+                "changed" => lines.push(Line::from(Span::styled("Changed", st(YELLOW)))),
+                _ => {}
+            }
+        }
+        WeekItem::Other(AgendaItem::Event(e)) => {
+            lines.push(Line::from(Span::styled(e.title.clone(), st(event_color(e)).add_modifier(Modifier::BOLD))));
+            lines.push(Line::from(Span::styled(times(e.start, e.end), st(MUTED))));
+            if !e.location.is_empty() {
+                lines.push(Line::from(Span::styled(e.location.clone(), st(MUTED))));
+            }
+            if !e.notes.trim().is_empty() {
+                lines.push(Line::from(Span::styled(e.notes.trim().replace('\n', " · "), st(FG))));
+            }
+            if e.source == crate::planner::SOURCE_STUDY_FIXED {
+                lines.push(Line::from(Span::styled("You changed this, so planning keeps it", st(DIM))));
+            }
+        }
+        WeekItem::Other(AgendaItem::Task(t)) => {
+            lines.push(Line::from(Span::styled(t.title.clone(), st(FG).add_modifier(Modifier::BOLD))));
+            if let Some(d) = t.due {
+                lines.push(Line::from(Span::styled(format!("due {}", fmt_abs(d)), st(due_color(d, now_ts())))));
+            }
+        }
+    }
+    lines
+}
+
+fn draw_week_side(f: &mut Frame, app: &App, area: Rect) {
+    let mut lines = match app.selected_week_item() {
+        Some(item) => week_item_lines(&item),
+        None => vec![Line::from(Span::styled(format!("{}: nothing here", app.cal_date.format("%a %d %b")), st(DIM)))],
+    };
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled("Upcoming tests", st(ORANGE).add_modifier(Modifier::BOLD))));
+    let now = now_ts();
+    let exams: Vec<&Event> = app.events.iter().filter(|e| e.source == crate::planner::SOURCE_UNTIS && e.start > now).take(8).collect();
+    if exams.is_empty() {
+        lines.push(Line::from(Span::styled("None. Press s to sync.", st(DIM))));
+    }
+    for exam in exams {
+        let key = exam.ext_id.clone().unwrap_or_default();
+        let sessions = app.events.iter().filter(|e| e.is_study() && e.start > now && e.ext_id.as_deref().is_some_and(|x| x.starts_with(&format!("study:{key}#")))).count();
+        lines.push(Line::from(vec![Span::styled(format!("{} ", local(exam.start).format("%d.%m")), st(RED)), Span::styled(fit(&exam.title, 20), st(FG)), Span::styled(format!(" {sessions}✎"), st(ORANGE))]));
+    }
+    lines.push(Line::default());
+    lines.extend(key_lines(&[("p", "plan study sessions"), ("h l", "day"), ("j k", "item"), ("[ ]", "week"), ("t", "this week"), ("o", "add event"), ("Enter", "edit"), ("d", "delete"), ("+ -", "move a day")]));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(panel(" This week ")), area);
+}
+
+/// On a small screen, one day as a list beats a squashed grid.
+fn draw_week_day_list(f: &mut Frame, app: &App, area: Rect) {
+    let items = app.week_items(app.cal_date);
+    let mut lines = vec![Line::from(Span::styled(app.cal_date.format("%A %d %B").to_string(), st(ORANGE).add_modifier(Modifier::BOLD)))];
+    if items.is_empty() {
+        lines.push(Line::from(Span::styled("Nothing here.", st(DIM))));
+    }
+    for (i, item) in items.iter().enumerate() {
+        let (fg, _, label) = week_item_style(item);
+        let color = if fg == BG { ORANGE } else { fg };
+        let bg = if i == app.sel_week { Style::default().bg(SEL) } else { Style::default() };
+        lines.push(Line::from(vec![Span::styled(format!("{} ", local(item.start()).format("%H:%M")), st(MUTED)), Span::styled(label, st(color))]).style(bg));
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
 fn draw_calendar(f: &mut Frame, app: &App, area: Rect) {
     let wide = area.width >= 90;
     let [grid_area, side] = if wide {
@@ -662,7 +847,7 @@ fn draw_calendar(f: &mut Frame, app: &App, area: Rect) {
                 let color = match item {
                     AgendaItem::Task(t) if t.is_moodle() => BLUE,
                     AgendaItem::Task(_) => ORANGE,
-                    AgendaItem::Event(_) => GREEN,
+                    AgendaItem::Event(e) => event_color(e),
                 };
                 let color = if same_month { color } else { DIM };
                 lines.push(Line::from(Span::styled(fit(item.title(), rect.width as usize), st(color))));
@@ -692,7 +877,7 @@ fn draw_agenda(f: &mut Frame, app: &App, area: Rect) {
         let is_sel = i == app.sel_agenda;
         let (color, from_moodle) = match item {
             AgendaItem::Task(t) => (if t.is_moodle() { BLUE } else { ORANGE }, t.is_moodle()),
-            AgendaItem::Event(e) => (GREEN, e.source == "moodle"),
+            AgendaItem::Event(e) => (event_color(e), e.is_readonly()),
         };
         let when = match item {
             AgendaItem::Event(e) if e.end > e.start => format!("{}–{}", local(e.start).format("%H:%M"), local(e.end).format("%H:%M")),
@@ -704,7 +889,7 @@ fn draw_agenda(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(if is_sel { "› " } else { "  " }, st(ORANGE)),
                 Span::styled(format!("{when} "), st(color)),
                 Span::styled(item.title().to_string(), st(FG).add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() })),
-                Span::styled(if from_moodle { " moodle" } else { "" }, st(DIM)),
+                Span::styled(if from_moodle { " school" } else { "" }, st(DIM)),
             ])
             .style(bg),
         );
@@ -1126,48 +1311,6 @@ fn draw_habits(f: &mut Frame, app: &App, area: Rect) {
     draw_buffer(f, area, rows, app.sel_habits, true);
 }
 
-fn grade_detail<'a>(g: &Grade) -> Vec<Line<'a>> {
-    let mut l = vec![Line::from(Span::styled(g.course.clone(), st(FG).add_modifier(Modifier::BOLD))), Line::default()];
-    if g.items.is_empty() {
-        let note = if g.current { "No grade items yet." } else { "Items aren't synced for past courses." };
-        l.push(Line::from(Span::styled(note, st(DIM))));
-    }
-    for it in &g.items {
-        let style = if it.total { st(ORANGE).add_modifier(Modifier::BOLD) } else { st(FG) };
-        l.push(Line::from(vec![
-            Span::styled(pad(&it.name, 30), style),
-            Span::styled(format!(" {:>8}", it.grade), style),
-            Span::styled(format!(" {:>9}", it.pct), st(DIM)),
-        ]));
-        if !it.feedback.is_empty() {
-            l.push(Line::from(Span::styled(format!("  │ {}", it.feedback), st(MUTED))));
-        }
-    }
-    l
-}
-
-fn draw_grades(f: &mut Frame, app: &App, area: Rect) {
-    let (list, preview) = with_preview(area);
-    let grades = app.visible_grades();
-    if grades.is_empty() {
-        empty(f, list, "No grades synced yet. Press gs to sync Moodle.");
-    } else {
-        let w = (list.width as usize).saturating_sub(4 + 12);
-        let rows: Vec<Row> = grades
-            .iter()
-            .map(|g| {
-                let color = if g.grade == "-" { DIM } else { ORANGE };
-                Row::Item(Line::from(vec![Span::styled(format!("{:>10}  ", fit(&g.grade, 10)), st(color)), Span::styled(fit(&g.course, w), st(if g.current { FG } else { DIM }))]))
-            })
-            .collect();
-        draw_buffer(f, list, rows, app.sel_grades, true);
-    }
-    if let Some(p) = preview {
-        let lines = grades.get(app.sel_grades).map(|g| grade_detail(g)).unwrap_or_default();
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((app.preview_scroll, 0)).block(panel(" Items ")), p);
-    }
-}
-
 const DIGITS: [[&str; 5]; 11] = [
     ["█████", "█   █", "█   █", "█   █", "█████"],
     ["  █  ", "  █  ", "  █  ", "  █  ", "  █  "],
@@ -1224,36 +1367,6 @@ fn draw_focus(f: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::default());
     lines.push(center("s start   p pause   b break   x stop   + / - 5 min".to_string(), DIM));
     f.render_widget(Paragraph::new(lines), area);
-}
-
-fn draw_claude(f: &mut Frame, app: &App, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
-    if app.chat.is_empty() && !app.chat_busy {
-        lines.push(Line::from(Span::styled("Ask anything about your workload. Press i to start.", st(MUTED))));
-        lines.push(Line::from(Span::styled("Claude sees your tasks, calendar, habits and Moodle inbox. It never sees your notes.", st(DIM))));
-    }
-    for (is_user, text) in &app.chat {
-        if *is_user {
-            lines.push(Line::from(Span::styled("› You", st(BLUE).add_modifier(Modifier::BOLD))));
-            lines.extend(text.lines().map(|l| Line::from(Span::styled(l.to_string(), st(FG)))));
-        } else {
-            lines.push(Line::from(Span::styled("✻ Claude", st(ORANGE).add_modifier(Modifier::BOLD))));
-            lines.extend(md_lines(text));
-        }
-        lines.push(Line::default());
-    }
-    if app.chat_busy {
-        const SPIN: [&str; 4] = ["✢", "✳", "✶", "✻"];
-        lines.push(Line::from(Span::styled(format!("{} thinking…", SPIN[app.spinner / 2 % 4]), st(ORANGE))));
-    }
-    let block = panel(" ✻ Claude ");
-    let inner = block.inner(area);
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
-    // chat_scroll counts up from the newest line, so the view sticks to the bottom by default.
-    let total = para.line_count(inner.width) as u16;
-    let max = total.saturating_sub(inner.height);
-    let scroll = max.saturating_sub(app.chat_scroll.min(max));
-    f.render_widget(para.scroll((scroll, 0)).block(block), area);
 }
 
 fn draw_chats(f: &mut Frame, app: &App, area: Rect) {
@@ -1642,9 +1755,8 @@ const LEADER_KEYS: &[(&str, &str)] = &[
     ("f", "find note"),
     ("d", "daily note"),
     ("h", "habits"),
-    ("g", "grades"),
+    ("w", "week planner"),
     ("p", "focus timer"),
-    ("a", "ask claude"),
     ("C", "chats"),
     ("l", "learn from a course"),
     ("m", "open moodle cli"),
@@ -1689,6 +1801,12 @@ Enter on your own task edits its notes.
 Quick add:  Read chapter 4 @fri 18:00 !! #AM ~45m
 Dates:  today, tom, fri, +3d, +4h, 14.11., 2026-12-01 08:15, 21:00
 
+# Week
+h l  change day   j k  pick an item   H L or [ ]  change week   t  this week
+p  plan study sessions   s  sync   o  add event   a  add task
+Enter edit   d delete   + -  move a day   x  tick a task   u  undo, also a plan
+Sessions you edit or move are kept when you plan again.
+
 # Calendar
 h j k l  move by day or week   H L  change month   t  today
 o  add event   a  add task   Enter or e  edit   d  delete (asks first)
@@ -1712,15 +1830,9 @@ j k  scroll   J K or Space  page   12G  go to page 12   gg G  first, last
 # Habits
 x  tick the selected day   h l  pick a day   o  new   dd  delete
 
-# Grades
-J K  scroll items   zp  show past courses
-
 # Focus
 s  start   p  pause   b  break   x  stop   + -  change by 5 min
 gf on a task starts a session tied to that task.
-
-# Claude
-i  ask   j k  scroll   c  clear the chat
 
 # Chats
 o  new chat   c  learn from a course   Enter open   n Claude's notes
@@ -1737,7 +1849,7 @@ j k  move   Enter or x  change   h l  step a value
 
 # Commands
 :sync   :brief   :add ...   :event ...   :note name   :daily   :habit name
-:focus 25   :stop   :filter moodle   :notify   :moodle   :pdf file   :chats   :learn   :books   :settings   :q
+:focus 25   :stop   :filter moodle   :notify   :moodle   :pdf file   :week   :plan   :chats   :learn   :books   :settings   :q
 
 # Texting LockIn from your phone
 Turn it on in Settings. Then write to your ntfy topic: add tasks and events, tick
@@ -1982,7 +2094,6 @@ mod tests {
             window_from: 0,
             tasks: vec![task("hw", "https://x/mod/assign/view.php?id=42&action=editsubmission")],
             events: vec![],
-            grades: vec![],
             inbox: vec![],
         };
         app.db.apply_snapshot(&snapshot).unwrap();
@@ -2252,6 +2363,82 @@ mod tests {
         press(&mut app, "\n");
         assert_eq!(app.msg_kind, MsgKind::Error, "switching off is loud");
         assert!(app.msg.contains("OFF"));
+
+        // Week planner: lessons from Untis, a test, and study sessions planned around them.
+        let monday = today() + Duration::days(7) - Duration::days(today().weekday().num_days_from_monday() as i64);
+        let clock = |h, m| chrono::NaiveTime::from_hms_opt(h, m, 0).unwrap();
+        let on = |offset: i64, h, m| crate::timeutil::ts_of(monday + Duration::days(offset), clock(h, m));
+        let mut lessons = Vec::new();
+        for offset in 0..5 {
+            for (n, (h, m)) in [(8, 0), (8, 55), (10, 0)].iter().enumerate() {
+                lessons.push(crate::db::Lesson { id: offset * 10 + n as i64 + 1000, subject: "0AM".into(), room: "E26".into(), status: "normal".into(), start: on(offset, *h, *m), end: on(offset, *h, *m) + 50 * 60, ..Default::default() });
+            }
+        }
+        let from = crate::timeutil::ts_of(monday - Duration::days(7), clock(0, 0));
+        let to = crate::timeutil::ts_of(monday + Duration::days(14), clock(0, 0));
+        app.db.replace_lessons(from, to, &lessons).unwrap();
+        let exam = crate::db::RemoteEvent { ext_id: "untis:x:08:00:0AM".into(), title: "Test AM".into(), course: "0AM".into(), start: on(4, 8, 0), end: on(4, 8, 50), location: "E26".into(), notes: "Test\n1st Test".into() };
+        app.db.apply_exams(&[exam]).unwrap();
+        app.refresh();
+        app.cfg.daily_use_claude = false;
+        press(&mut app, ":week\n");
+        assert_eq!(app.view, View::Week);
+        app.cal_date = monday;
+        app.sel_week = 0;
+        let grid = screen(&mut app, 140, 34);
+        assert!(grid.contains("AM E26"), "{grid}");
+        assert!(grid.contains("Upcoming tests") && grid.contains("Test AM"), "{grid}");
+        assert!(matches!(app.selected_week_item(), Some(WeekItem::Lesson(_))));
+        // Double periods are joined, and lessons can't be changed.
+        assert_eq!(app.week_items(monday).len(), 1, "periods with normal breaks between them join into one block");
+        press(&mut app, "d");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.msg.contains("Untis"));
+        // Planning fits sessions around the lessons, ahead of the test.
+        press(&mut app, "p");
+        let planned: Vec<_> = app.events.iter().filter(|e| e.is_study()).cloned().collect();
+        assert_eq!(planned.len(), 3, "{}", app.msg);
+        for s in &planned {
+            assert!(s.start > now_ts() && s.end <= on(4, 8, 0), "before the test: {}", fmt_abs(s.start));
+            for l in &lessons {
+                assert!(s.end <= l.start || s.start >= l.end, "{} hits a lesson", fmt_abs(s.start));
+            }
+        }
+        let first_day = crate::timeutil::date_of(planned.iter().map(|s| s.start).min().unwrap());
+        app.cal_date = first_day;
+        app.sel_week = app.week_items(first_day).iter().position(|i| matches!(i, WeekItem::Other(_))).unwrap();
+        assert!(screen(&mut app, 140, 34).contains("Study AM"));
+        // Moving one makes it yours, and planning again keeps it where you put it.
+        press(&mut app, "+");
+        let moved = app.events.iter().find(|e| e.source == crate::planner::SOURCE_STUDY_FIXED).expect("moved session is kept").clone();
+        press(&mut app, "p");
+        assert!(app.events.iter().any(|e| e.id == moved.id && e.start == moved.start), "your move survives planning");
+        assert_eq!(app.events.iter().filter(|e| e.is_study()).count(), 3, "the kept session counts towards the total");
+        // Undo brings back what the plan replaced.
+        let planned_now: Vec<i64> = app.events.iter().filter(|e| e.source == crate::planner::SOURCE_STUDY).map(|e| e.id).collect();
+        press(&mut app, "u");
+        assert_ne!(app.events.iter().filter(|e| e.source == crate::planner::SOURCE_STUDY).map(|e| e.id).collect::<Vec<_>>(), planned_now);
+        // Deleting a session works from the grid too, with the usual question.
+        app.cal_date = crate::timeutil::date_of(moved.start);
+        app.sel_week = app.week_items(app.cal_date).iter().position(|i| matches!(i, WeekItem::Other(AgendaItem::Event(e)) if e.id == moved.id)).unwrap();
+        press(&mut app, "dy");
+        assert!(!app.events.iter().any(|e| e.id == moved.id));
+        // A plan for new tests only leaves a deleted session deleted.
+        let before = app.events.iter().filter(|e| e.is_study()).count();
+        crate::planner::plan(&app.db, &app.cfg, crate::planner::Mode::NewExamsOnly, false).unwrap();
+        app.refresh();
+        assert_eq!(app.events.iter().filter(|e| e.is_study()).count(), before);
+        // The test itself is read-only, wherever it's selected.
+        app.cal_date = monday + Duration::days(4);
+        app.sel_agenda = app.agenda(app.cal_date).iter().position(|i| i.title() == "Test AM").unwrap();
+        press(&mut app, ":cal\nd");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.msg.contains("Untis"));
+        // Weeks move, and "today" comes back.
+        press(&mut app, ":week\n]");
+        assert_eq!(app.week_start(), monday + Duration::days(7));
+        press(&mut app, "t");
+        assert_eq!(app.cal_date, today());
 
         // Quitting during a focus session asks first.
         press(&mut app, ":q\n");

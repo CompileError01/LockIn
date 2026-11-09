@@ -76,36 +76,6 @@ def collect(path):
             "notes": text(e.get("description"))[:INTRO_LIMIT],
         })
 
-    grades = []
-    for g in api.call("gradereport_overview_get_course_grades").get("grades", []):
-        c = by_id.get(g.get("courseid"))
-        if not c:
-            continue
-        current = group(c) == 0
-        items = []
-        if current:
-            try:
-                r = api.call("gradereport_user_get_grade_items", courseid=c["id"], userid=sh.uid)
-                for it in (r.get("usergrades") or [{}])[0].get("gradeitems") or []:
-                    name = text(it.get("itemname")) or ("Course total" if it.get("itemtype") == "course" else "Category total")
-                    items.append({
-                        "name": name,
-                        "grade": text(it.get("gradeformatted")) or "-",
-                        "range": text(it.get("rangeformatted")),
-                        "pct": text(it.get("percentageformatted")),
-                        "feedback": text(it.get("feedback"))[:500],
-                        "total": it.get("itemtype") in ("course", "category"),
-                    })
-            except m.MoodleError:
-                pass
-        grades.append({
-            "course_id": c["id"],
-            "course": text(c.get("fullname")),
-            "grade": text(g.get("grade")) or "-",
-            "current": current,
-            "items": items,
-        })
-
     inbox = []
     for n in api.call("message_popup_get_popup_notifications", useridto=sh.uid, limit=30, newestfirst=1).get("notifications", []):
         subject = text(n.get("subject"))
@@ -124,7 +94,7 @@ def collect(path):
         "folder": str(sh.dl_dir() / m.safe_name(c.get("shortname"))),
     } for c in courses]
 
-    return {"courses": course_list, "window_from": window_from, "tasks": tasks, "events": events, "grades": grades, "inbox": inbox}
+    return {"courses": course_list, "window_from": window_from, "tasks": tasks, "events": events, "inbox": inbox}
 
 
 def main():

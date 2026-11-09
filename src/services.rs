@@ -198,6 +198,110 @@ pub fn sync(db: &mut Db) -> Result<SyncSummary> {
     db.apply_snapshot(&snapshot)
 }
 
+// ---- Untis ---------------------------------------------------------------
+
+const UNTIS_WEEKS: i64 = 5;
+
+fn untis_json(args: &[&str]) -> Result<Value> {
+    let out = Command::new(find_bin("timeout"))
+        .arg("40")
+        .arg(find_bin("untis"))
+        .args(args)
+        .arg("--json")
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .context("could not start untis")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("Untis: {}", stderr.trim().lines().last().unwrap_or("request failed"));
+    }
+    serde_json::from_slice(&out.stdout).context("Untis gave no usable answer")
+}
+
+fn text_list(v: &Value) -> String {
+    v.as_array().map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default()
+}
+
+/// A day and time from Untis, like `2026-11-13` and `08:55`.
+fn untis_time(date: &str, time: &str) -> Option<i64> {
+    let day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let at = chrono::NaiveTime::parse_from_str(time, "%H:%M").ok()?;
+    Some(crate::timeutil::ts_of(day, at))
+}
+
+pub fn parse_lessons(data: &Value) -> Vec<crate::db::Lesson> {
+    data.as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|l| {
+                    let date = l["date"].as_str()?;
+                    let subject = text_list(&l["subjects"]);
+                    let kind = l["type"].as_str().unwrap_or("").to_string();
+                    Some(crate::db::Lesson {
+                        id: l["id"].as_i64()?,
+                        subject: if subject.is_empty() { kind.clone() } else { subject },
+                        subject_long: text_list(&l["subjects_long"]),
+                        teacher: text_list(&l["teachers"]),
+                        room: text_list(&l["rooms"]),
+                        status: l["status"].as_str().unwrap_or("normal").to_string(),
+                        kind,
+                        start: untis_time(date, l["start"].as_str()?)?,
+                        end: untis_time(date, l["end"].as_str()?)?,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn parse_exams(data: &Value) -> Vec<crate::db::RemoteEvent> {
+    data.as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|e| {
+                    let (date, start, end) = (e["date"].as_str()?, e["start"].as_str()?, e["end"].as_str()?);
+                    let subject = e["subject"].as_str().unwrap_or("").to_string();
+                    let kind = e["type"].as_str().unwrap_or("Test");
+                    let text = e["text"].as_str().unwrap_or("").trim();
+                    Some(crate::db::RemoteEvent {
+                        ext_id: format!("untis:{date}:{start}:{subject}"),
+                        title: format!("{kind} {}", crate::planner::clean_subject(&subject)),
+                        course: subject,
+                        start: untis_time(date, start)?,
+                        end: untis_time(date, end)?,
+                        location: text_list(&e["rooms"]),
+                        notes: format!("{kind}\n{text}"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Pulls your timetable and exams. `Ok(None)` means there's no untis command, which is fine.
+pub fn sync_untis(db: &mut Db) -> Result<Option<String>> {
+    if !find_bin("untis").is_file() {
+        return Ok(None);
+    }
+    let mut lessons = Vec::new();
+    for week in 0..UNTIS_WEEKS {
+        let target = format!("+{week}");
+        let args: Vec<&str> = if week == 0 { vec!["week"] } else { vec!["week", &target] };
+        lessons.extend(parse_lessons(&untis_json(&args)?));
+    }
+    use chrono::{Datelike, Duration};
+    let monday = today() - Duration::days(today().weekday().num_days_from_monday() as i64);
+    let from = crate::timeutil::ts_of(monday, chrono::NaiveTime::MIN);
+    let to = crate::timeutil::ts_of(monday + Duration::days(7 * UNTIS_WEEKS), chrono::NaiveTime::MIN);
+    db.replace_lessons(from, to, &lessons)?;
+    let exams = parse_exams(&untis_json(&["exams"])?);
+    db.apply_exams(&exams)?;
+    db.set_meta("last_untis", &now_ts().to_string())?;
+    Ok(Some(format!("{} lessons, {} tests", lessons.len(), exams.len())))
+}
+
 // ---- Claude --------------------------------------------------------------
 
 /// Runs `claude -p` with no tools, so nothing in the prompt can act on your machine or Moodle.
@@ -267,11 +371,21 @@ pub fn context_json(db: &Db) -> Result<Value> {
         .iter()
         .map(|h| json!({"name": h.name, "done_today": h.days.contains(&today()), "streak_days": h.streak()}))
         .collect();
+    let mut timetable = Vec::new();
+    for offset in 0..3 {
+        let day = today() + chrono::Duration::days(offset);
+        for l in crate::planner::merge_lessons(&db.lessons_on(day)?) {
+            if l.status != "cancelled" {
+                timetable.push(json!({"subject": crate::planner::clean_subject(&l.subject), "start": fmt_abs(l.start), "end": fmt_abs(l.end), "room": l.room, "changed": l.status == "changed"}));
+            }
+        }
+    }
     let inbox: Vec<Value> = db.inbox()?.iter().take(15).map(|n| json!({"subject": n.subject, "message": n.message})).collect();
     Ok(json!({
         "now": fmt_abs(now),
         "open_tasks": open,
         "calendar_next_8_days": events,
+        "timetable_next_3_days": timetable,
         "habits": habits,
         "unread_moodle_notifications": inbox,
         "focus_minutes_today": db.focus_minutes_today()?,
@@ -329,24 +443,6 @@ Reply in English and return an entry in `tasks` for every open task. {UNTRUSTED_
     }
     db.add_briefing(&out.headline, &out.plan)?;
     Ok(out)
-}
-
-pub fn chat(db: &Db, cfg: &Config, transcript: &[(bool, String)]) -> Result<String> {
-    let system = format!(
-        "You are the assistant inside LockIn, a terminal organizer used by a student. {}\
-Answer briefly and concretely in plain terminal-friendly Markdown. You can't change anything in the app, so tell the \
-student what to do instead. You can't see their notes. {UNTRUSTED_NOTE}",
-        about_line(cfg)
-    );
-    let mut prompt = format!("<context>\n{}\n</context>\n\n", serde_json::to_string(&context_json(db)?)?);
-    for (is_user, text) in transcript.iter().rev().take(12).rev() {
-        prompt += if *is_user { "Student: " } else { "Assistant: " };
-        prompt += text;
-        prompt += "\n\n";
-    }
-    prompt += "Assistant:";
-    let reply = claude(cfg, &system, &prompt, None)?;
-    Ok(reply["result"].as_str().unwrap_or("(empty reply)").trim().to_string())
 }
 
 // ---- Notifications -------------------------------------------------------
@@ -468,6 +564,23 @@ pub fn daily(db: &mut Db, cfg: &Config) -> Result<()> {
             Err(_) => {}
         }
     }
+    match sync_untis(db) {
+        Ok(Some(summary)) => println!("timetable: {summary}"),
+        Ok(None) => {}
+        Err(e) => problems.push(format!("Untis sync failed: {e}")),
+    }
+    let mut planned = None;
+    if cfg.study_auto_plan {
+        match crate::planner::plan(db, cfg, crate::planner::Mode::NewExamsOnly, true) {
+            Ok(outcome) => {
+                println!("{}", outcome.summary());
+                if !outcome.added.is_empty() {
+                    planned = Some(outcome.summary());
+                }
+            }
+            Err(e) => problems.push(format!("Planning failed: {e}")),
+        }
+    }
     let brief_out = if cfg.daily_use_claude {
         match brief(db, cfg) {
             Ok(b) => Some(b),
@@ -480,6 +593,9 @@ pub fn daily(db: &mut Db, cfg: &Config) -> Result<()> {
         None
     };
     let (title, mut body, urgent) = compose(&db.tasks()?, brief_out.as_ref());
+    if let Some(note) = planned {
+        body += &format!("\n{note}. See the Week tab.");
+    }
     if !synced {
         body += "\n⚠ Moodle sync failed, so this may be out of date.";
     } else if brief_out.is_none() && cfg.daily_use_claude {
@@ -559,6 +675,27 @@ mod tests {
         // Each line holds two rows of modules, so the code is as tall as it is wide.
         assert!((lines.len() * 2).abs_diff(width) <= 1);
         assert!(lines[0].chars().all(|c| c == '█'), "a light border, which scanners need");
+    }
+
+    #[test]
+    fn untis_data_is_read_and_bad_rows_are_skipped() {
+        let week = json!([
+            {"id": 7, "date": "2026-11-09", "start": "08:00", "end": "08:50", "subjects": ["0BWMBO"], "subjects_long": ["BO"], "teachers": ["FREYP"], "rooms": ["E26"], "status": "changed", "type": "Unterricht"},
+            {"id": 8, "date": "2026-11-09", "start": "09:00", "end": "09:50", "subjects": [], "teachers": [], "rooms": [], "status": "normal", "type": "Externe Veranst."},
+            {"id": 9, "date": "soon", "start": "09:00", "end": "09:50", "subjects": ["X"]},
+            {"date": "2026-11-09", "start": "09:00", "end": "09:50"},
+        ]);
+        let lessons = parse_lessons(&week);
+        assert_eq!(lessons.len(), 2);
+        assert_eq!((lessons[0].subject.as_str(), lessons[0].room.as_str(), lessons[0].status.as_str()), ("0BWMBO", "E26", "changed"));
+        assert_eq!(lessons[1].subject, "Externe Veranst.", "no subject falls back to its type");
+        assert!(parse_lessons(&json!({"error": "x"})).is_empty());
+
+        let exams = parse_exams(&json!([{"date": "2026-11-13", "start": "08:55", "end": "09:45", "subject": "0AM", "type": "Schularbeit", "text": "1st Written Test", "rooms": ["E26"]}]));
+        assert_eq!(exams[0].title, "Schularbeit AM");
+        assert_eq!(exams[0].ext_id, "untis:2026-11-13:08:55:0AM");
+        assert_eq!(exams[0].notes, "Schularbeit\n1st Written Test");
+        assert_eq!(exams[0].end - exams[0].start, 50 * 60);
     }
 
     #[test]

@@ -43,6 +43,15 @@ pub struct Config {
     /// Without Claude, the daily run sends a plain list of what's due.
     pub daily_use_claude: bool,
     pub sync_on_open: bool,
+    /// The daily job plans study sessions for exams it hasn't planned yet.
+    pub study_auto_plan: bool,
+    pub study_session_minutes: i64,
+    pub study_max_per_day: i64,
+    /// Latest finish on a school day.
+    pub study_until: String,
+    /// Study hours on weekends and holidays.
+    pub study_free_day_from: String,
+    pub study_free_day_until: String,
     /// Minutes between Moodle syncs while the app is open. 0 turns this off.
     pub sync_interval_minutes: i64,
 }
@@ -74,6 +83,12 @@ impl Default for Config {
             daily_catch_up: true,
             daily_use_claude: true,
             sync_on_open: true,
+            study_auto_plan: true,
+            study_session_minutes: 50,
+            study_max_per_day: 2,
+            study_until: "20:00".into(),
+            study_free_day_from: "10:00".into(),
+            study_free_day_until: "18:00".into(),
             sync_interval_minutes: 60,
         }
     }
