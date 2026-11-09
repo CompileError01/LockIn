@@ -6,6 +6,7 @@ mod db;
 mod files;
 mod form;
 mod pdf;
+mod replies;
 mod services;
 mod settings;
 mod timeutil;
@@ -47,6 +48,11 @@ enum Cmd {
     BooksHelper { mode: String, title: Option<String> },
     /// Describe digi4school's responses with no personal data, for fixing problems
     BooksDebug,
+    /// Turn texting LockIn from your phone on or off
+    Replies { state: String },
+    /// Internal: the background service for phone replies
+    #[command(hide = true)]
+    Listen,
     /// Send a test notification to the desktop and phone
     Notify,
     /// Install or update the daily systemd timer from your settings
@@ -124,6 +130,21 @@ fn main() -> Result<()> {
         }
         Some(Cmd::BooksHelper { .. }) => unreachable!("handled above"),
         Some(Cmd::BooksDebug) => books::debug(&cfg.digi4school_email),
+        Some(Cmd::Listen) => replies::listen(&cfg),
+        Some(Cmd::Replies { state }) => {
+            let mut cfg = cfg;
+            let on = match state.as_str() {
+                "on" => true,
+                "off" => false,
+                _ => anyhow::bail!("Use: lockin replies on, or lockin replies off"),
+            };
+            let changed = services::set_replies(&mut cfg, on)?;
+            println!("Phone replies are {}.", if on { "on" } else { "off" });
+            if changed {
+                println!("You have a new private topic. Run lockin status to see it, and subscribe to it in the ntfy app.");
+            }
+            Ok(())
+        }
         Some(Cmd::Notify) => {
             let errors = services::notify_all(&cfg, "LockIn test", "Notifications are working.", false, false);
             for e in &errors {
@@ -135,6 +156,7 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Install) => {
             services::apply_timer(&cfg)?;
+            services::apply_listener(&cfg)?;
             println!("Daily timer updated. Next run: {}", services::timer_next_run());
             Ok(())
         }
@@ -145,6 +167,7 @@ fn main() -> Result<()> {
             println!("database    {}", config::db_path().display());
             println!("vault       {}", cfg.vault);
             println!("phone topic {}/{}", cfg.ntfy_server, cfg.ntfy_topic);
+            println!("replies     {}", if cfg.ntfy_replies { "on" } else { "off" });
             println!("last sync   {}", fmt("last_sync"));
             println!("last daily  {}", fmt("last_daily"));
             Ok(())

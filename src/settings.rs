@@ -14,6 +14,7 @@ pub enum Key {
     SyncInterval,
     Desktop,
     Phone,
+    PhoneReplies,
     NtfyServer,
     NtfyTopic,
     Model,
@@ -51,6 +52,7 @@ pub const ROWS: &[(&str, Key)] = &[
     ("Moodle updates", Key::SyncInterval),
     ("Notifications", Key::Desktop),
     ("Notifications", Key::Phone),
+    ("Notifications", Key::PhoneReplies),
     ("Notifications", Key::NtfyServer),
     ("Notifications", Key::NtfyTopic),
     ("Claude", Key::Model),
@@ -77,7 +79,7 @@ const LANGUAGES: [&str; 3] = ["auto", "English", "Deutsch"];
 pub fn kind(key: Key) -> Kind {
     use Key::*;
     match key {
-        DailyEnabled | DailyCatchUp | DailyClaude | SyncOnOpen | Desktop | Phone | Icons => Kind::Toggle,
+        DailyEnabled | DailyCatchUp | DailyClaude | SyncOnOpen | Desktop | Phone | PhoneReplies | Icons => Kind::Toggle,
         DailyDays | SyncInterval | Model | TutorModel | TutorLanguage | FocusMinutes | BreakMinutes => Kind::Choice,
         DailyTimes | NtfyServer | NtfyTopic | AboutMe | Vault | NewNoteDir | Editor => Kind::Text,
         RunDaily | SyncNow | TestNotify | ForgetBooksPassword | EditFile => Kind::Action,
@@ -99,6 +101,7 @@ pub fn label(key: Key) -> &'static str {
         Key::SyncInterval => "Sync while the app is open",
         Key::Desktop => "Desktop",
         Key::Phone => "Phone (ntfy)",
+        Key::PhoneReplies => "Text LockIn from your phone",
         Key::NtfyServer => "ntfy server",
         Key::NtfyTopic => "ntfy topic",
         Key::Model => "Model",
@@ -135,6 +138,7 @@ pub fn value(cfg: &Config, key: Key) -> String {
         },
         Key::Desktop => on_off(cfg.desktop_notifications),
         Key::Phone => on_off(cfg.ntfy_enabled),
+        Key::PhoneReplies => on_off(cfg.ntfy_replies),
         Key::NtfyServer => cfg.ntfy_server.clone(),
         Key::NtfyTopic => cfg.ntfy_topic.clone(),
         Key::Model => cfg.model.clone(),
@@ -162,6 +166,7 @@ pub fn help(key: Key) -> &'static str {
         Key::SyncInterval => "How often to pull from Moodle while LockIn stays open. This doesn't use Claude.",
         Key::Desktop => "Show notifications on this computer through mako.",
         Key::Phone => "Push notifications to your phone through ntfy. Task titles are sent to the ntfy server.",
+        Key::PhoneReplies => "Send a message to your ntfy topic to add tasks and events, tick things off, sync, or ask Claude. It works while the app is closed, if you're logged in. Anyone who knows the topic can do the same, so the first time this goes on you get a new private topic to subscribe to. It can't delete anything, submit to Moodle or read your files.",
         Key::NtfyServer => "The server that delivers phone notifications. Change it only if you host your own.",
         Key::NtfyTopic => "Subscribe to this name in the ntfy app. Anyone who knows it can read your notifications, so keep it private.",
         Key::Model => "The Claude model for the briefing and the Claude tab. Haiku uses the least of your usage, and Opus uses the most.",
@@ -192,6 +197,7 @@ pub fn step(cfg: &mut Config, key: Key, dir: i64) {
         Key::SyncOnOpen => cfg.sync_on_open = !cfg.sync_on_open,
         Key::Desktop => cfg.desktop_notifications = !cfg.desktop_notifications,
         Key::Phone => cfg.ntfy_enabled = !cfg.ntfy_enabled,
+        Key::PhoneReplies => cfg.ntfy_replies = !cfg.ntfy_replies,
         Key::Icons => cfg.nerd_icons = !cfg.nerd_icons,
         Key::SyncInterval => {
             let i = SYNC_STEPS.iter().position(|m| *m == cfg.sync_interval_minutes).unwrap_or(3) as i64;

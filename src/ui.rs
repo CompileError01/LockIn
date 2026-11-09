@@ -1738,6 +1738,10 @@ j k  move   Enter or x  change   h l  step a value
 # Commands
 :sync   :brief   :add ...   :event ...   :note name   :daily   :habit name
 :focus 25   :stop   :filter moodle   :notify   :moodle   :pdf file   :chats   :learn   :books   :settings   :q
+
+# Texting LockIn from your phone
+Turn it on in Settings. Then write to your ntfy topic: add tasks and events, tick
+things off, sync, or ask Claude. It works with the app closed.
 ";
 
 fn draw_help(f: &mut Frame, app: &App, body: Rect) {
@@ -2216,6 +2220,23 @@ mod tests {
         assert!(app.chats.teach);
         app.chats.busy.clear();
         press(&mut app, ":filter all\n:chats\nh");
+
+        // Turning phone replies on replaces the topic once, and only once.
+        let first_topic = app.cfg.ntfy_topic.clone();
+        assert!(!app.cfg.ntfy_replies, "replies are off until you choose them");
+        let row = settings::ROWS.iter().position(|(_, k)| *k == settings::Key::PhoneReplies).unwrap();
+        press(&mut app, ":settings\n");
+        app.sel_settings = row;
+        press(&mut app, "\n");
+        assert!(app.cfg.ntfy_replies && app.cfg.ntfy_enabled, "{}", app.msg);
+        let second_topic = app.cfg.ntfy_topic.clone();
+        assert_ne!(first_topic, second_topic);
+        assert!(second_topic.starts_with("lockin-") && second_topic.len() > 30);
+        press(&mut app, "\n");
+        assert!(!app.cfg.ntfy_replies);
+        press(&mut app, "\n");
+        assert_eq!(app.cfg.ntfy_topic, second_topic, "switching back on keeps your subscription working");
+        assert_eq!(crate::config::load().unwrap().ntfy_topic, second_topic, "and it's saved");
 
         // Quitting during a focus session asks first.
         press(&mut app, ":q\n");

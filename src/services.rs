@@ -60,6 +60,54 @@ pub fn apply_timer(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Turns phone replies on or off. The first time on, it switches to a fresh private topic, because
+/// the topic is now also what lets someone send commands. Returns true if the topic changed.
+pub fn set_replies(cfg: &mut Config, on: bool) -> Result<bool> {
+    let mut changed = false;
+    cfg.ntfy_replies = on;
+    if on {
+        cfg.ntfy_enabled = true;
+        if !cfg.ntfy_reply_topic_ready {
+            cfg.ntfy_topic = crate::config::random_topic()?;
+            cfg.ntfy_reply_topic_ready = true;
+            changed = true;
+        }
+    }
+    crate::config::save(cfg)?;
+    apply_listener(cfg)?;
+    Ok(changed)
+}
+
+/// Writes and starts the background listener, or stops it. The unit holds no secrets.
+pub fn apply_listener(cfg: &Config) -> Result<()> {
+    if crate::config::is_sandboxed() {
+        return Ok(());
+    }
+    let home = crate::config::home();
+    let dir = home.join(".config/systemd/user");
+    let unit = dir.join("lockin-listen.service");
+    if cfg.ntfy_replies {
+        std::fs::create_dir_all(&dir)?;
+        let path = format!("{0}/.local/bin:{0}/.cargo/bin:/usr/local/bin:/usr/bin:/bin", home.display());
+        let exe = std::env::current_exe()?;
+        std::fs::write(
+            &unit,
+            format!(
+                "[Unit]\nDescription=LockIn phone replies\n\n[Service]\nEnvironment=PATH={path}\nExecStart={} listen\nRestart=always\nRestartSec=30\n\n[Install]\nWantedBy=default.target\n",
+                exe.display()
+            ),
+        )?;
+        systemctl(&["daemon-reload"])?;
+        systemctl(&["enable", "lockin-listen.service"])?;
+        systemctl(&["restart", "lockin-listen.service"])?;
+    } else if unit.exists() {
+        systemctl(&["disable", "--now", "lockin-listen.service"])?;
+        std::fs::remove_file(&unit)?;
+        systemctl(&["daemon-reload"])?;
+    }
+    Ok(())
+}
+
 /// When the timer fires next, in systemd's own words.
 pub fn timer_next_run() -> String {
     if crate::config::is_sandboxed() {
@@ -288,7 +336,7 @@ pub fn desktop(title: &str, body: &str, critical: bool) -> Result<()> {
 pub fn ntfy(cfg: &Config, title: &str, body: &str, high: bool) -> Result<()> {
     let payload = json!({
         "topic": cfg.ntfy_topic, "title": title, "message": body,
-        "priority": if high { 4 } else { 3 }, "tags": ["spiral_notepad"],
+        "priority": if high { 4 } else { 3 }, "tags": ["spiral_notepad", crate::replies::OUT_TAG],
     });
     let mut child = Command::new(find_bin("curl"))
         .args(["-fsS", "-m", "20", "--retry", "3", "--retry-all-errors", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-"])

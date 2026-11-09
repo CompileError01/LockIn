@@ -27,6 +27,10 @@ pub struct Config {
     pub ntfy_server: String,
     /// Anyone who knows this topic name can read your pushes, so keep it private.
     pub ntfy_topic: String,
+    /// Lets messages sent to the topic control LockIn, through a background service.
+    pub ntfy_replies: bool,
+    /// The topic was replaced with a fresh one when replies were first turned on.
+    pub ntfy_reply_topic_ready: bool,
     pub focus_minutes: i64,
     pub break_minutes: i64,
     /// Runs the systemd timer at all.
@@ -60,6 +64,8 @@ impl Default for Config {
             ntfy_enabled: false,
             ntfy_server: "https://ntfy.sh".into(),
             ntfy_topic: String::new(),
+            ntfy_replies: false,
+            ntfy_reply_topic_ready: false,
             focus_minutes: 25,
             break_minutes: 5,
             daily_enabled: true,
@@ -100,7 +106,7 @@ pub fn db_path() -> PathBuf {
     data_dir().join("lockin.db")
 }
 
-fn random_topic() -> Result<String> {
+pub fn random_topic() -> Result<String> {
     use std::io::Read;
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;

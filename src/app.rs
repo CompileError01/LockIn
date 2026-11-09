@@ -2002,12 +2002,24 @@ impl App {
             result = services::apply_timer(&self.cfg);
             self.timer_next = services::timer_next_run();
         }
+        let mut new_topic = false;
+        if key == settings::Key::PhoneReplies {
+            let on = self.cfg.ntfy_replies;
+            match services::set_replies(&mut self.cfg, on) {
+                Ok(changed) => new_topic = changed,
+                Err(e) => result = Err(e),
+            }
+        } else if matches!(key, settings::Key::NtfyTopic | settings::Key::NtfyServer) && self.cfg.ntfy_replies {
+            // The listener reads these when it starts, so it needs a restart to use them.
+            result = result.and_then(|()| services::apply_listener(&self.cfg));
+        }
         if key == settings::Key::Vault {
             self.browser = Browser::new(PathBuf::from(&self.cfg.vault));
             self.sel_notes = 0;
             self.scan_notes();
         }
         match result {
+            Ok(()) if new_topic => self.info("Replies on, with a new private topic. Subscribe to the topic shown below in the ntfy app"),
             Ok(()) => self.info(format!("{}: {}", settings::label(key), settings::value(&self.cfg, key))),
             Err(e) => self.error(format!("Saved, but the schedule wasn't updated: {e}")),
         }

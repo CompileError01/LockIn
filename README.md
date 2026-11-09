@@ -135,6 +135,31 @@ Install the ntfy app and subscribe to the topic that `lockin status` prints. The
 only thing protecting those messages on the public ntfy.sh server, so keep it private. Phone pushes
 start off, and you can turn them on in the Settings tab.
 
+### Texting LockIn back
+
+Run `lockin replies on`, or use the Settings tab. The first time, you get a new private topic, so
+subscribe to the one `lockin status` prints. Then send a message to that topic from the ntfy app or
+[its web app](https://ntfy.sh/app):
+
+```
+remind me to call mum tomorrow at 5     Claude works out what you mean
+what's due this week?                   Claude answers from your tasks and calendar
+add Read chapter 4 @fri 18:00           adds a task, with no Claude
+list                                    open tasks, with their numbers
+done 12                                 ticks off task 12
+sync                                    updates from Moodle
+help                                    this list
+```
+
+A background service does this, so the app can be closed, but your computer has to be on and you have to
+be logged in. Messages sent while it's off are picked up later, for about 12 hours.
+
+**The topic name works like a password.** Anyone who has it can read your replies and send commands, so
+keep it private. To limit the damage if it leaks, LockIn can only add tasks and events, tick off tasks and
+sync from here. It can't delete anything, submit to Moodle, read your files or run commands, and it answers
+at most 20 messages an hour. Messages and replies pass through the ntfy server. If you think the name has
+leaked, change the topic in Settings. Turn the feature off with `lockin replies off`.
+
 ## Developing
 
 ```

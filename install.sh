@@ -86,8 +86,9 @@ if $UNINSTALL; then
     step "Removing LockIn"
     if systemd_user_works; then
         systemctl --user disable --now lockin-daily.timer >/dev/null 2>&1 || true
+        systemctl --user disable --now lockin-listen.service >/dev/null 2>&1 || true
     fi
-    rm -f "$HOME/.config/systemd/user/lockin-daily.timer" "$HOME/.config/systemd/user/lockin-daily.service" "$BIN_DIR/lockin"
+    rm -f "$HOME/.config/systemd/user/lockin-daily.timer" "$HOME/.config/systemd/user/lockin-daily.service" "$HOME/.config/systemd/user/lockin-listen.service" "$BIN_DIR/lockin"
     if systemd_user_works; then
         systemctl --user daemon-reload >/dev/null 2>&1 || true
     fi
