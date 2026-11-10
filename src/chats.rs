@@ -2,13 +2,14 @@
 
 use crate::app::{assignment_id, App, Bg, Confirm, EditTarget, Mode, Prompt, View};
 use crate::books::{self, RemoteBook};
+use crate::cards::{self, Card, Rating};
 use crate::config::{self, db_path};
 use crate::db::Db;
 use crate::files::{self, Browser, Entry, Preview, Sort};
 use crate::tutor::{self, ChatRow, Course, Material, Note, Role};
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -25,6 +26,7 @@ pub enum Level {
     Courses,
     Materials,
     Notes,
+    Cards,
 }
 
 pub struct BookJob {
@@ -73,6 +75,16 @@ pub struct ChatsState {
     pub asked_to_save: bool,
     pub listing: bool,
     pub job: Option<BookJob>,
+    /// The cards left to review in this sitting. The first one is on screen.
+    pub cards: Vec<Card>,
+    pub cards_session: Option<i64>,
+    pub cards_back: Level,
+    pub cards_all: bool,
+    pub card_flipped: bool,
+    pub cards_reviewed: usize,
+    pub cards_next: Option<chrono::NaiveDate>,
+    /// Per chat: cards due today, and cards in all.
+    pub card_counts: HashMap<i64, (usize, usize)>,
 }
 
 impl Default for ChatsState {
@@ -113,6 +125,14 @@ impl Default for ChatsState {
             asked_to_save: false,
             listing: false,
             job: None,
+            cards: vec![],
+            cards_session: None,
+            cards_back: Level::List,
+            cards_all: false,
+            card_flipped: false,
+            cards_reviewed: 0,
+            cards_next: None,
+            card_counts: HashMap::new(),
         }
     }
 }
@@ -156,6 +176,7 @@ impl App {
             Level::Courses => self.chats.courses.len(),
             Level::Materials => self.chats.materials.len(),
             Level::Notes => self.chats.notes.len(),
+            Level::Cards => 0,
         }
     }
 
@@ -170,6 +191,7 @@ impl App {
             Level::Courses => Some(&mut self.chats.course_sel),
             Level::Materials => Some(&mut self.chats.material),
             Level::Notes => Some(&mut self.chats.note_sel),
+            Level::Cards => None,
         }
     }
 
@@ -188,6 +210,9 @@ impl App {
     pub fn reload_chats(&mut self) {
         if let Ok(list) = tutor::list_chats(&self.db) {
             self.chats.list = list;
+        }
+        if let Ok(counts) = cards::counts(&self.db) {
+            self.chats.card_counts = counts;
         }
         if let Some(id) = self.chats.session {
             if let Ok(log) = tutor::messages(&self.db, id) {
@@ -249,6 +274,7 @@ impl App {
                 }
             }
             Level::Materials => self.start_lesson(false),
+            Level::Cards => self.flip_card(),
             Level::Notes => {
                 if let Some(n) = self.chats.notes.get(self.chats.note_sel) {
                     self.want_editor = Some(EditTarget::Note(n.path.clone()));
@@ -289,6 +315,11 @@ impl App {
                 self.reload_chats();
             }
             Level::Notes => self.chats.level = self.chats.notes_back,
+            Level::Cards => {
+                self.chats.level = self.chats.cards_back;
+                self.chats.cards.clear();
+                self.reload_chats();
+            }
             Level::Files => self.chats.level = Level::Chat,
             Level::Picker => {
                 let at_top = self.chats.browser.as_ref().is_some_and(|b| b.parent_dir().is_none());
@@ -335,6 +366,23 @@ impl App {
                     self.start_lesson(false);
                 }
             }
+            (Level::List, 'F') => {
+                if let Some(id) = self.chats.list.get(self.chats.sel).map(|c| c.id) {
+                    self.open_cards(id, false);
+                }
+            }
+            (Level::Chat, 'F') => {
+                if let Some(id) = self.chats.session {
+                    self.open_cards(id, false);
+                }
+            }
+            (Level::Cards, ' ') => self.flip_card(),
+            (Level::Cards, 'a') => {
+                if let Some(id) = self.chats.cards_session {
+                    self.open_cards(id, true);
+                }
+            }
+            (Level::Cards, '1'..='4') => self.rate_card(c),
             (Level::Chat, 't') => self.toggle_teach(),
             (Level::Chat, 'v') => {
                 self.chats.file_sel = 0;
@@ -385,7 +433,66 @@ impl App {
                     self.mode = Mode::Confirm(Confirm::DeleteTutorNote(n.path.clone()));
                 }
             }
+            Level::Cards => {
+                if let Some(card) = self.chats.cards.first().cloned() {
+                    let r = cards::delete_card(&self.db, card.id);
+                    self.attempt(r);
+                    self.chats.cards.remove(0);
+                    self.chats.card_flipped = false;
+                    self.refresh_next_card();
+                    self.info("Deleted the card");
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// Opens a chat's flashcards: the ones due today, or all of them with `all`.
+    pub fn open_cards(&mut self, session: i64, all: bool) {
+        match cards::cards(&self.db, session, all) {
+            Ok(list) => {
+                if self.chats.level != Level::Cards {
+                    self.chats.cards_back = self.chats.level;
+                }
+                self.chats.cards = list;
+                self.chats.cards_session = Some(session);
+                self.chats.cards_all = all;
+                self.chats.card_flipped = false;
+                self.chats.cards_reviewed = 0;
+                self.chats.level = Level::Cards;
+                self.refresh_next_card();
+            }
+            Err(e) => self.error(format!("Couldn't load the flashcards: {e}")),
+        }
+    }
+
+    fn refresh_next_card(&mut self) {
+        self.chats.cards_next = self.chats.cards_session.and_then(|id| cards::next_due(&self.db, id).ok().flatten());
+    }
+
+    fn flip_card(&mut self) {
+        if !self.chats.cards.is_empty() {
+            self.chats.card_flipped = !self.chats.card_flipped;
+        }
+    }
+
+    fn rate_card(&mut self, key: char) {
+        let (Some(rating), Some(card)) = (Rating::from_key(key), self.chats.cards.first().cloned()) else { return };
+        if !self.chats.card_flipped {
+            return self.info("Press Space to see the answer first");
+        }
+        match cards::rate(&self.db, &card, rating) {
+            Ok(updated) => {
+                self.chats.cards.remove(0);
+                // A card you didn't know comes round again in this sitting.
+                if rating == Rating::Again {
+                    self.chats.cards.push(updated);
+                }
+                self.chats.card_flipped = false;
+                self.chats.cards_reviewed += 1;
+                self.refresh_next_card();
+            }
+            Err(e) => self.error(format!("Couldn't save that: {e}")),
         }
     }
 

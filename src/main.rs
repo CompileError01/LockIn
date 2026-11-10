@@ -1,5 +1,6 @@
 mod app;
 mod books;
+mod cards;
 mod chats;
 mod config;
 mod db;

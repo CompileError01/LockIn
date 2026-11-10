@@ -1453,6 +1453,7 @@ fn draw_chats(f: &mut Frame, app: &App, area: Rect) {
         ChatLevel::Courses => draw_courses(f, app, area),
         ChatLevel::Materials => draw_materials(f, app, area),
         ChatLevel::Notes => draw_chat_notes(f, app, area),
+        ChatLevel::Cards => draw_chat_cards(f, app, area),
     }
 }
 
@@ -1465,7 +1466,7 @@ fn draw_chat_list(f: &mut Frame, app: &App, area: Rect) {
     if app.chats.list.is_empty() {
         empty(f, list, "No chats yet. Press o for a new chat, or c to learn from a course.");
     } else {
-        let width = (list.width as usize).saturating_sub(4 + 2 + 9 + 10 + 10);
+        let width = (list.width as usize).saturating_sub(4 + 2 + 9 + 10 + 10 + 9);
         let rows = app
             .chats
             .list
@@ -1476,10 +1477,17 @@ fn draw_chat_list(f: &mut Frame, app: &App, area: Rect) {
                     1 => "1 file".to_string(),
                     n => format!("{n} files"),
                 };
+                let (due, total) = app.chats.card_counts.get(&c.id).copied().unwrap_or((0, 0));
+                let (cards, card_color) = match (due, total) {
+                    (_, 0) => (String::new(), DIM),
+                    (0, _) => ("✓ cards".to_string(), DIM),
+                    (n, _) => (format!("{n} due"), YELLOW),
+                };
                 Row::Item(Line::from(vec![
                     Span::styled(if app.chats.busy.contains(&c.id) { "✻ " } else if c.teach { "✎ " } else { "  " }, st(ORANGE)),
                     Span::styled(pad(&c.title, width), st(FG)),
                     Span::styled(format!(" {:<8}", course_tag(&c.course)), st(BLUE)),
+                    Span::styled(format!(" {cards:>8}"), st(card_color)),
                     Span::styled(format!(" {files:>9}"), st(DIM)),
                     Span::styled(format!(" {:>9}", fmt_rel(c.updated_at)), st(DIM)),
                 ]))
@@ -1491,10 +1499,10 @@ fn draw_chat_list(f: &mut Frame, app: &App, area: Rect) {
     let mut lines = vec![
         Line::from(Span::styled("✻ Your chats", st(ORANGE).add_modifier(Modifier::BOLD))),
         Line::default(),
-        Line::from(Span::styled("Each chat has its own files. Claude reads them, looks up pages in big books, and says where a number came from. Turn on teach mode and it guides you through the work instead, using your teacher's methods. ✎ marks teaching chats.", st(MUTED))),
+        Line::from(Span::styled("Each chat has its own files. Claude reads them, looks up pages in big books, and says where a number came from. Turn on teach mode and it guides you through the work instead, using your teacher's methods. ✎ marks teaching chats. Ask for flashcards in a chat, and F reviews them.", st(MUTED))),
         Line::default(),
     ];
-    lines.extend(key_lines(&[("o", "new chat"), ("c", "learn from a course"), ("Enter", "open"), ("n", "Claude's notes"), ("B", "your books"), ("r", "rename"), ("d", "delete")]));
+    lines.extend(key_lines(&[("o", "new chat"), ("c", "learn from a course"), ("Enter", "open"), ("F", "flashcards"), ("n", "Claude's notes"), ("B", "your books"), ("r", "rename"), ("d", "delete")]));
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(panel(" Chats ")), side);
 }
 
@@ -1552,8 +1560,8 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     if app.chats.docs.is_empty() {
         info.push(Line::from(Span::styled("None yet.", st(DIM))));
     }
-    // The keys take 8 rows, the headings 5, and the rest is shared by files and notes.
-    let room = side.height.saturating_sub(15) as usize;
+    // The keys take 9 rows, the headings 5, and the rest is shared by files and notes.
+    let room = side.height.saturating_sub(16) as usize;
     let file_room = room.div_ceil(2).max(1);
     for d in app.chats.docs.iter().take(file_room) {
         let name = d.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -1569,7 +1577,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         info.push(Line::from(vec![Span::styled("✎ ", st(GREEN)), Span::styled(fit(&n.title, name_room), st(MUTED))]));
     }
     info.push(Line::default());
-    info.extend(key_lines(&[("i", "ask"), ("f", "files"), ("t", "teach mode"), ("n", "notes"), ("v", "view a file"), ("j k", "scroll"), ("h", "back")]));
+    info.extend(key_lines(&[("i", "ask"), ("f", "files"), ("t", "teach mode"), ("n", "notes"), ("F", "flashcards"), ("v", "view a file"), ("j k", "scroll"), ("h", "back")]));
     f.render_widget(Paragraph::new(info).block(panel(" This chat ")), side);
 }
 
@@ -1656,6 +1664,57 @@ fn draw_materials(f: &mut Frame, app: &App, area: Rect) {
     if inner.height > 1 {
         f.render_widget(Paragraph::new(Span::styled(fit(keys, inner.width as usize), st(DIM))).style(Style::default().bg(BG)), Rect { y: inner.y + inner.height - 1, height: 1, ..inner });
     }
+}
+
+fn draw_chat_cards(f: &mut Frame, app: &App, area: Rect) {
+    let c = &app.chats;
+    let title = c.cards_session.and_then(|id| c.list.iter().find(|r| r.id == id)).map_or(String::new(), |r| r.title.clone());
+    let block = panel(format!(" Flashcards: {} ", fit(&title, (area.width as usize).saturating_sub(18))));
+    let mut lines: Vec<Line> = Vec::new();
+    match c.cards.first() {
+        None => {
+            let done = if c.cards_reviewed > 0 { format!("Done for now: you went through {} cards.", c.cards_reviewed) } else { "Nothing to review right now.".to_string() };
+            lines.push(Line::from(Span::styled(done, st(GREEN).add_modifier(Modifier::BOLD))));
+            lines.push(Line::default());
+            let next = match c.cards_next {
+                None => "This chat has no flashcards yet. Open the chat, press i and ask Claude for some, like \"make flashcards for chapter 3\".".to_string(),
+                Some(d) if d <= today() => "Some cards are due again today. Press a to go through them.".to_string(),
+                Some(d) => format!("The next card comes back {}.", d.format("%a %-d %b")),
+            };
+            lines.push(Line::from(Span::styled(next, st(MUTED))));
+            lines.push(Line::default());
+            lines.extend(key_lines(&[("a", "review all cards anyway"), ("h", "back")]));
+        }
+        Some(card) => {
+            let left = c.cards.len();
+            let what = if c.cards_all { "all cards" } else { "due today" };
+            lines.push(Line::from(Span::styled(format!("{left} left, {what} · {} done", c.cards_reviewed), st(DIM))));
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled("Question", st(ORANGE).add_modifier(Modifier::BOLD))));
+            lines.extend(md_lines(&card.front));
+            lines.push(Line::default());
+            if c.card_flipped {
+                lines.push(Line::from(Span::styled("Answer", st(GREEN).add_modifier(Modifier::BOLD))));
+                lines.extend(md_lines(&card.back));
+                lines.push(Line::default());
+                lines.push(Line::from(vec![
+                    Span::styled("1", st(RED)),
+                    Span::styled(" again   ", st(DIM)),
+                    Span::styled("2", st(YELLOW)),
+                    Span::styled(" hard   ", st(DIM)),
+                    Span::styled("3", st(GREEN)),
+                    Span::styled(" good   ", st(DIM)),
+                    Span::styled("4", st(BLUE)),
+                    Span::styled(" easy", st(DIM)),
+                ]));
+            } else {
+                lines.push(Line::from(Span::styled("Think of the answer, then press Space to see it.", st(MUTED))));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled("a all cards   d delete this card   h back", st(DIM))));
+        }
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
 }
 
 fn draw_chat_notes(f: &mut Frame, app: &App, area: Rect) {
@@ -1926,6 +1985,8 @@ In a chat: i ask   f files   t teach mode   n notes   v view a file   j k scroll
 Files: a add   d remove   v view     Adding: Enter open or add   x add   h back
 Courses: Enter open   s download files. Exercises: Enter learn   v view   N restart
 Notes: Enter edit   d delete   u undo.   Books: L log in   Enter get or read   x stop
+Flashcards: ask for them in a chat, then F reviews them. Space flip   1 again   2 hard
+3 good   4 easy   a all cards   d delete card
 L on a Moodle task, or on a file in Notes, starts a teaching chat on it.
 Only the files you add go to Claude.
 
@@ -2330,7 +2391,7 @@ mod tests {
         assert!(screen(&mut app, 120, 30).contains("page 3/10"));
         app.on_book_event(serde_json::json!({"event": "done", "title": "Physik 2", "count": 1}));
         assert!(app.chats.job.is_none());
-        for level in [ChatLevel::List, ChatLevel::Chat, ChatLevel::Files, ChatLevel::Picker, ChatLevel::Books, ChatLevel::Courses, ChatLevel::Materials, ChatLevel::Notes] {
+        for level in [ChatLevel::List, ChatLevel::Chat, ChatLevel::Files, ChatLevel::Picker, ChatLevel::Books, ChatLevel::Courses, ChatLevel::Materials, ChatLevel::Notes, ChatLevel::Cards] {
             app.chats.level = level;
             for (w, h) in [(160, 45), (120, 30), (80, 24), (60, 16), (30, 8), (10, 4)] {
                 screen(&mut app, w, h);
@@ -2537,6 +2598,35 @@ mod tests {
         assert_eq!(app.week_start(), monday + Duration::days(7));
         press(&mut app, "t");
         assert_eq!(app.cal_date, today());
+
+        // Flashcards from a chat: Space flips, 1 to 4 rate, and a missed card comes round again.
+        press(&mut app, ":chats\n");
+        let deck = tutor::create_chat(&app.db, "Bio").unwrap();
+        crate::cards::add_cards(&app.db, deck, &[("Cell?".into(), "Unit of life".into()), ("DNA?".into(), "Genes".into())]).unwrap();
+        app.chats.level = ChatLevel::List;
+        app.reload_chats();
+        app.chats.sel = app.chats.list.iter().position(|c| c.id == deck).unwrap();
+        assert!(screen(&mut app, 130, 30).contains("2 due"));
+        press(&mut app, "F");
+        assert_eq!(app.chats.level, ChatLevel::Cards);
+        assert!(screen(&mut app, 100, 30).contains("Cell?"));
+        press(&mut app, "3");
+        assert_eq!(app.chats.cards.len(), 2, "no rating before you've seen the answer");
+        press(&mut app, " ");
+        assert!(screen(&mut app, 100, 30).contains("Unit of life"));
+        assert_eq!(app.pending, None, "Space flips here instead of opening the leader menu");
+        press(&mut app, "1");
+        assert_eq!(app.chats.cards.iter().map(|c| c.front.as_str()).collect::<Vec<_>>(), ["DNA?", "Cell?"]);
+        press(&mut app, " 3 4");
+        assert!(app.chats.cards.is_empty());
+        assert!(screen(&mut app, 100, 30).contains("Done for now"));
+        press(&mut app, "a");
+        assert_eq!(app.chats.cards.len(), 2, "a goes through every card anyway");
+        press(&mut app, "d");
+        assert_eq!(crate::cards::cards(&app.db, deck, true).unwrap().len(), 1);
+        press(&mut app, "h");
+        assert_eq!(app.chats.level, ChatLevel::List);
+        assert_eq!(app.chats.card_counts[&deck], (0, 1));
 
         // Quitting during a focus session asks first.
         press(&mut app, ":q\n");

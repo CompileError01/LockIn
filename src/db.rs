@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS tutor_sessions(
   pulled INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, teach INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS tutor_messages(
   id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, role INTEGER NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS cards(
+  id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, front TEXT NOT NULL, back TEXT NOT NULL, due TEXT NOT NULL,
+  interval_days INTEGER NOT NULL DEFAULT 0, ease REAL NOT NULL DEFAULT 2.5, reps INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS cards_session ON cards(session_id, due);
 ";
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -63,6 +67,10 @@ pub struct Task {
 impl Task {
     pub fn is_moodle(&self) -> bool {
         self.source == "moodle"
+    }
+    /// Moodle and Untis own these, so deleting or moving one would only come back on the next sync.
+    pub fn is_synced(&self) -> bool {
+        self.is_moodle() || self.source == crate::planner::SOURCE_UNTIS
     }
 }
 
@@ -514,6 +522,60 @@ impl Db {
         tx.commit()?;
         Ok(sum)
     }
+
+    /// Homework from Untis. Like Moodle: what Untis marks done, or stops listing while it's still in
+    /// its window, closes itself, and what you ticked off yourself stays ticked off.
+    pub fn apply_homework(&mut self, items: &[RemoteTask], completed: &HashSet<String>, window_from: i64) -> Result<SyncSummary> {
+        let mut sum = SyncSummary::default();
+        let now = now_ts();
+        let tx = self.c.transaction()?;
+        for r in items {
+            let finished = completed.contains(&r.ext_id);
+            let existing: Option<(bool, Option<String>)> = tx
+                .query_row("SELECT done,done_by FROM tasks WHERE ext_id=?1", [&r.ext_id], |x| Ok((x.get(0)?, x.get(1)?)))
+                .optional()?;
+            match existing {
+                None => {
+                    tx.execute(
+                        "INSERT INTO tasks(title,notes,due,source,ext_id,course,created_at,done,done_by,done_at)
+                         VALUES(?1,?2,?3,'untis',?4,?5,?6,?7,CASE WHEN ?7 THEN 'untis' END,CASE WHEN ?7 THEN ?6 END)",
+                        params![r.title, r.notes, r.due, r.ext_id, r.course, now, finished],
+                    )?;
+                    sum.added += 1;
+                }
+                Some((done, by)) => {
+                    let ours = by.as_deref() == Some("untis");
+                    let (close, reopen) = (!done && finished, done && ours && !finished);
+                    tx.execute(
+                        "UPDATE tasks SET title=?2,notes=?3,due=?4,course=?5,
+                         done=CASE WHEN ?6 THEN 1 WHEN ?7 THEN 0 ELSE done END,
+                         done_by=CASE WHEN ?6 THEN 'untis' WHEN ?7 THEN NULL ELSE done_by END,
+                         done_at=CASE WHEN ?6 THEN ?8 WHEN ?7 THEN NULL ELSE done_at END WHERE ext_id=?1",
+                        params![r.ext_id, r.title, r.notes, r.due, r.course, close, reopen, now],
+                    )?;
+                    if close {
+                        sum.completed += 1;
+                    } else {
+                        sum.updated += 1;
+                    }
+                }
+            }
+        }
+        let seen: HashSet<&str> = items.iter().map(|t| t.ext_id.as_str()).collect();
+        let open: Vec<(i64, String)> = {
+            let mut st = tx.prepare("SELECT id,ext_id FROM tasks WHERE source='untis' AND done=0 AND due>=?1")?;
+            let rows = st.query_map([window_from], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        for (id, ext) in open {
+            if !seen.contains(ext.as_str()) {
+                tx.execute("UPDATE tasks SET done=1,done_by='untis',done_at=?2 WHERE id=?1", params![id, now])?;
+                sum.completed += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(sum)
+    }
 }
 
 #[cfg(test)]
@@ -541,6 +603,32 @@ mod tests {
 
     fn snap(tasks: Vec<RemoteTask>, window_from: i64) -> Snapshot {
         Snapshot { window_from, tasks, events: vec![], inbox: vec![] }
+    }
+
+    #[test]
+    fn homework_closes_itself_and_respects_what_you_ticked() {
+        let mut d = db();
+        let due = now_ts() + 3600;
+        let hw = |id: &str, due: i64| RemoteTask { url: String::new(), action: String::new(), ..remote(id, due) };
+        let none = HashSet::new();
+        let s = d.apply_homework(&[hw("a", due), hw("b", due), hw("c", due), hw("old", 100)], &none, 0).unwrap();
+        assert_eq!(s.added, 4);
+        let get = |d: &Db, id: &str| d.tasks().unwrap().into_iter().find(|t| t.ext_id.as_deref() == Some(id)).unwrap();
+        assert_eq!(get(&d, "a").source, "untis");
+
+        // b is done in Untis, c is gone, and old is gone but outside the window.
+        let mine = get(&d, "a").id;
+        d.c.execute("UPDATE tasks SET done=1,done_by='user' WHERE id=?1", [mine]).unwrap();
+        let done: HashSet<String> = ["b".to_string()].into();
+        d.apply_homework(&[hw("a", due), hw("b", due)], &done, 1000).unwrap();
+        assert!(get(&d, "b").done && get(&d, "b").done_by.as_deref() == Some("untis"));
+        assert!(get(&d, "c").done, "gone from Untis inside the window");
+        assert!(!get(&d, "old").done, "outside the window it can't be seen either way");
+
+        // Untis lists b as open again, so it reopens. a you ticked yourself stays done.
+        d.apply_homework(&[hw("a", due), hw("b", due)], &none, 1000).unwrap();
+        assert!(!get(&d, "b").done);
+        assert!(get(&d, "a").done && get(&d, "a").done_by.as_deref() == Some("user"));
     }
 
     #[test]

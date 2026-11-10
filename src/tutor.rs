@@ -360,6 +360,7 @@ pub fn set_doc(db: &Db, id: i64, path: &Path, attach: bool) -> Result<()> {
 
 pub fn delete_session(db: &Db, id: i64) -> Result<()> {
     db.c.execute("DELETE FROM tutor_messages WHERE session_id=?1", [id])?;
+    crate::cards::delete_deck(db, id)?;
     db.c.execute("DELETE FROM tutor_sessions WHERE id=?1", [id])?;
     Ok(())
 }
@@ -400,11 +401,14 @@ fn store_session(db: &Db, s: &Session) -> Result<()> {
 
 // ---- talking to Claude -----------------------------------------------------
 
-const SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["reply","notes","need_pages","search"],"properties":{
+const SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["reply","notes","cards","need_pages","search"],"properties":{
 "reply":{"type":"string","description":"What you say to the student."},
 "notes":{"type":"array","maxItems":5,"description":"Notes to create, or to replace when the title matches an existing note. Usually empty.","items":{"type":"object","additionalProperties":false,"required":["title","body"],"properties":{
 "title":{"type":"string","description":"Short name, like the method's name."},
 "body":{"type":"string","description":"Complete note text. It replaces any older note with this title."}}}},
+"cards":{"type":"array","maxItems":40,"description":"Flashcards to add to this chat's deck, only when the student asks for flashcards. Usually empty.","items":{"type":"object","additionalProperties":false,"required":["front","back"],"properties":{
+"front":{"type":"string","description":"A short question or term."},
+"back":{"type":"string","description":"The answer, short enough to check at a glance."}}}},
 "need_pages":{"type":"array","maxItems":6,"description":"Pages you need to see before you can answer properly. Usually empty.","items":{"type":"object","additionalProperties":false,"required":["doc","page"],"properties":{
 "doc":{"type":"integer","description":"Document number from the material list."},
 "page":{"type":"integer","description":"Page number, starting at 1."}}}},
@@ -415,6 +419,8 @@ struct Reply {
     reply: String,
     #[serde(default)]
     notes: Vec<NoteOut>,
+    #[serde(default)]
+    cards: Vec<CardOut>,
     #[serde(default)]
     need_pages: Vec<PageRef>,
     #[serde(default)]
@@ -430,10 +436,18 @@ struct NoteOut {
 }
 
 #[derive(Deserialize, Debug)]
+struct CardOut {
+    front: String,
+    back: String,
+}
+
+#[derive(Deserialize, Debug)]
 struct PageRef {
     doc: usize,
     page: usize,
 }
+
+const CARD_RULES: &str = "Flashcards: when the student asks for flashcards, put them in cards, and say in your reply how many you made and what they cover. The app shows them for review with spaced repetition, so don't write them out in the reply too. One fact per card, with a short question or term on the front and a short answer on the back. Take them from the files and this chat, write them in the language the student asks in, and keep the teacher's terms. Make about 10 to 20 unless they ask for a number. Never make cards they didn't ask for.";
 
 const LOOKUP_RULES: &str = "Finding things: books are too long to read whole, so large documents come without their text. Use search to find the pages a word appears on, then list the pages you want in need_pages. If search finds nothing, the document may have no text layer, so open its contents pages near the start with need_pages and go from there. Page numbers here count the PDF's pages, and the number printed on a page may differ, so tell the student both when they differ. Read numbers, values and formulas from the page images, because extracted text often garbles them. Never state a value from a document unless you've seen it on the page image.";
 
@@ -443,7 +457,7 @@ fn chat_prompt(cfg: &Config) -> String {
     let about = cfg.about_me.trim();
     let about = if about.is_empty() { String::new() } else { format!("About the student: {about}.\n") };
     format!(
-        "{CHAT_INTRO}\n{about}\n{LOOKUP_RULES}\n\n\
+        "{CHAT_INTRO}\n{about}\n{LOOKUP_RULES}\n\n{CARD_RULES}\n\n\
 Format: this is a plain terminal. Never use LaTeX. Write math in plain Unicode, like x², √(a+b), (a+b)/c. Use short paragraphs and lists, with no tables. {}\n\n\
 Your notebook: your_notes holds notes from earlier chats, which the student can read and edit. Save a note only for a method or a fact worth keeping across chats. To update one, reuse its exact title and write the whole merged text.\n\n\
 The student can't upload images here. Files are added with the f key, so if you need another file, ask them to add it.\n\n\
@@ -485,7 +499,7 @@ How to teach:\n\
 - Start with the first exercise unless the student picks another.\n\
 - The student can't upload or paste images here, only type. If the exercise is in another file, tell them which one to add to this chat with the f key, or ask them to type it out.\n\
 - You only see some pages as images. If the student asks about a page you haven't seen as an image, or the page's text looks garbled, you must list it in need_pages and not answer from the extracted text. Keep that reply to one short line. The pages arrive right away, and you then answer properly.\n\n\
-{LOOKUP_RULES}\n\n\
+{LOOKUP_RULES}\n\n{CARD_RULES}\n\n\
 Format: this is a plain terminal. Never use LaTeX. Write math in plain Unicode, like x², √(a+b), (a+b)/c, a⁻¹, ≤, ·. Keep to short paragraphs and lists, with no tables, and under about 200 words unless asked for more. \
 {language}\n\n\
 Your notebook: your_notes holds notes you wrote in earlier sessions on this subject, which the student can also read and edit. Follow them so your teaching stays consistent. \
@@ -791,6 +805,7 @@ pub fn teach(db: &Db, cfg: &Config, session_id: i64, student_text: &str) -> Resu
     };
 
     let mut saved = save_notes(&subject, std::mem::take(&mut reply.notes));
+    let mut new_cards = take_cards(&mut reply);
     if reply.session_id.is_some() {
         s.claude_session = reply.session_id.clone();
     }
@@ -813,6 +828,7 @@ pub fn teach(db: &Db, cfg: &Config, session_id: i64, student_text: &str) -> Resu
         }));
         reply = call(cfg, &system, parts, s.claude_session.as_deref())?;
         saved.extend(save_notes(&subject, std::mem::take(&mut reply.notes)));
+        new_cards.extend(take_cards(&mut reply));
         if reply.session_id.is_some() {
             s.claude_session = reply.session_id.clone();
         }
@@ -822,8 +838,21 @@ pub fn teach(db: &Db, cfg: &Config, session_id: i64, student_text: &str) -> Resu
     for title in saved {
         add_message(db, s.id, Role::Saved, &format!("Saved a note: {title}"))?;
     }
+    if !new_cards.is_empty() {
+        let added = crate::cards::add_cards(db, s.id, &new_cards)?;
+        let text = match added {
+            0 => "These flashcards were already in this chat's deck. Press F to review.".to_string(),
+            1 => "Added 1 flashcard. Press F to review.".to_string(),
+            n => format!("Added {n} flashcards. Press F to review."),
+        };
+        add_message(db, s.id, Role::Saved, &text)?;
+    }
     s.notes_digest = format!("{}:{}", notes_digest(&load_notes(&subject)), docs_digest(&s.docs));
     store_session(db, &s)
+}
+
+fn take_cards(reply: &mut Reply) -> Vec<(String, String)> {
+    std::mem::take(&mut reply.cards).into_iter().map(|c| (c.front, c.back)).collect()
 }
 
 fn save_notes(subject: &str, notes: Vec<NoteOut>) -> Vec<String> {

@@ -118,6 +118,10 @@ The Week tab shows your timetable from Untis, with changes and cancellations mar
 events, and deadlines. It needs the `untis` command, logged in, in `~/.local/bin`. Without it, the tab still
 shows your own things. Press `[` and `]` to change week.
 
+Homework from Untis comes into Tasks on every sync, due at the start of that subject's lesson on the due day.
+Like Moodle work, it ticks itself off when Untis marks it completed or stops listing it, and homework you
+ticked off yourself stays ticked off.
+
 Press `p`, or run `lockin plan`, to plan study sessions for tests in the next four weeks. Code works out
 your free time first, so a session can't land on a lesson or an event: after school until 20:00 by default,
 and 10:00 to 18:00 on days without lessons. Claude then picks among those slots and says what to focus on,
@@ -127,6 +131,14 @@ A Schularbeit gets 5 sessions, a test gets 3, and a test of 30 minutes or less g
 calendar too. Sessions you edit or move are yours, and planning again keeps them. Press `u` to undo a plan.
 The daily job plans each new test once, so a session you delete stays deleted. The hours, the session
 length and the daily limit are in the Settings tab.
+
+## Flashcards
+
+In any chat, ask Claude for flashcards, like "make flashcards for chapter 3". It makes them from the chat's
+files and the conversation, and the chat says how many it added. Press `F` in the chat, or on a chat in the
+list, to review the ones due today: `Space` shows the answer, then `1` again, `2` hard, `3` good, `4` easy.
+Cards you know come back after longer and longer gaps, and a card you missed comes round again in the same
+sitting. `a` goes through every card anyway, and `d` deletes one. The chat list shows how many cards are due.
 
 ## Assignment drafts
 

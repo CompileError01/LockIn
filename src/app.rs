@@ -1447,6 +1447,12 @@ impl App {
             let n = self.count.take();
             return self.on_chord(prefix, c, n);
         }
+        // On a flashcard, Space flips it and 1 to 4 rate it, instead of the leader key and a count.
+        if self.view == View::Chats && self.chats.level == crate::chats::Level::Cards && matches!(c, ' ' | '1'..='4') {
+            self.count = None;
+            self.on_chats_key(c, 1);
+            return;
+        }
         if c.is_ascii_digit() && (c != '0' || self.count.is_some()) {
             let digit = c.to_digit(10).unwrap_or(0) as usize;
             self.count = Some((self.count.unwrap_or(0) * 10 + digit).min(9999));
@@ -1738,8 +1744,8 @@ impl App {
 
     fn delete_task_current(&mut self) {
         let Some(t) = self.current_task() else { return };
-        if t.is_moodle() {
-            return self.info("Moodle tasks can't be deleted. Press x to mark it done here");
+        if t.is_synced() {
+            return self.info("This comes from Moodle or Untis and would return on the next sync. Press x to mark it done");
         }
         self.undo.push(Undo::Task(t.clone()));
         let r = self.db.delete_task(t.id);
@@ -1865,7 +1871,7 @@ impl App {
     fn ask_delete_agenda(&mut self) {
         match self.selected_agenda() {
             None => self.info("Nothing to delete on this day"),
-            Some(AgendaItem::Task(t)) if t.is_moodle() => self.info("Moodle tasks can't be deleted. Press x to mark it done here"),
+            Some(AgendaItem::Task(t)) if t.is_synced() => self.info("This comes from Moodle or Untis and would return on the next sync. Press x to mark it done"),
             Some(AgendaItem::Event(e)) if e.is_readonly() => self.info("This comes from Moodle or Untis, and would return on the next sync"),
             Some(item) => self.mode = Mode::Confirm(Confirm::DeleteAgenda(item.title().to_string())),
         }
@@ -1884,7 +1890,7 @@ impl App {
     fn shift_agenda(&mut self, days: i64) {
         let (r, target, new_time) = match self.selected_agenda() {
             None => return self.info("Nothing selected on this day"),
-            Some(AgendaItem::Task(t)) if t.is_moodle() => return self.info("Moodle deadlines sync from Moodle, so they can't be moved"),
+            Some(AgendaItem::Task(t)) if t.is_synced() => return self.info("This deadline comes from Moodle or Untis, so it can't be moved"),
             Some(AgendaItem::Event(e)) if e.is_readonly() => return self.info("This comes from Moodle or Untis, so change it there"),
             Some(AgendaItem::Task(t)) => {
                 let due = form::shift_days(t.due.unwrap_or_else(now_ts), days);

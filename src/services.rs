@@ -6,6 +6,7 @@ use crate::timeutil::{date_of, fmt_abs, fmt_rel, now_ts, today};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -294,6 +295,62 @@ pub fn parse_exams(data: &Value) -> Vec<crate::db::RemoteEvent> {
         .unwrap_or_default()
 }
 
+const HOMEWORK_TITLE_CHARS: usize = 70;
+
+/// Homework from Untis, as tasks, and the ids Untis already marks completed. The due time is
+/// filled in later from the timetable, so this sets it to 08:00 on the due day.
+pub fn parse_homework(data: &Value) -> (Vec<crate::db::RemoteTask>, HashSet<String>) {
+    let mut done = HashSet::new();
+    let items = data
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|h| {
+                    let id = h["id"].as_i64()?;
+                    let due = untis_time(h["due"].as_str()?, "08:00")?;
+                    let subject = h["subject"].as_str().unwrap_or("").to_string();
+                    let text = h["text"].as_str().unwrap_or("").trim();
+                    let remark = h["remark"].as_str().unwrap_or("").trim();
+                    let first = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Homework");
+                    let mut short: String = first.chars().take(HOMEWORK_TITLE_CHARS).collect();
+                    if first.chars().count() > HOMEWORK_TITLE_CHARS {
+                        short = format!("{}…", short.trim_end());
+                    }
+                    let name = crate::planner::clean_subject(&subject);
+                    let ext_id = format!("untis-hw:{id}");
+                    if h["completed"].as_bool() == Some(true) {
+                        done.insert(ext_id.clone());
+                    }
+                    Some(crate::db::RemoteTask {
+                        ext_id,
+                        title: if name.is_empty() { short } else { format!("{name}: {short}") },
+                        course: subject,
+                        due,
+                        url: String::new(),
+                        action: String::new(),
+                        notes: if remark.is_empty() { text.to_string() } else { format!("{text}\n\n{remark}") },
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (items, done)
+}
+
+/// Moves homework due to the start of that subject's first lesson on the day, when there is one.
+fn homework_due_from_lessons(db: &Db, items: &mut [crate::db::RemoteTask]) -> Result<()> {
+    use crate::planner::{clean_subject, merge_lessons};
+    for item in items.iter_mut() {
+        let day = crate::timeutil::date_of(item.due);
+        let wanted = clean_subject(&item.course);
+        let lessons = merge_lessons(&db.lessons_on(day)?);
+        if let Some(l) = lessons.iter().find(|l| l.status != "cancelled" && clean_subject(&l.subject) == wanted) {
+            item.due = l.start;
+        }
+    }
+    Ok(())
+}
+
 /// Pulls your timetable and exams. `Ok(None)` means there's no untis command, which is fine.
 pub fn sync_untis(db: &mut Db) -> Result<Option<String>> {
     if !find_bin("untis").is_file() {
@@ -312,8 +369,18 @@ pub fn sync_untis(db: &mut Db) -> Result<Option<String>> {
     db.replace_lessons(from, to, &lessons)?;
     let exams = parse_exams(&untis_json(&["exams"])?);
     db.apply_exams(&exams)?;
+    let homework = match untis_json(&["homework"]) {
+        Ok(data) => {
+            let (mut items, done) = parse_homework(&data);
+            homework_due_from_lessons(db, &mut items)?;
+            let window_from = crate::timeutil::ts_of(today() - Duration::days(7), chrono::NaiveTime::MIN);
+            let sum = db.apply_homework(&items, &done, window_from)?;
+            format!(", {} open homework ({} new)", items.iter().filter(|i| !done.contains(&i.ext_id)).count(), sum.added)
+        }
+        Err(e) => format!(", homework failed: {e}"),
+    };
     db.set_meta("last_untis", &now_ts().to_string())?;
-    Ok(Some(format!("{} lessons, {} tests", lessons.len(), exams.len())))
+    Ok(Some(format!("{} lessons, {} tests{homework}", lessons.len(), exams.len())))
 }
 
 // ---- Claude --------------------------------------------------------------
@@ -753,6 +820,21 @@ mod tests {
         assert_eq!(exams[0].ext_id, "untis:2026-11-13:08:55:0AM");
         assert_eq!(exams[0].notes, "Schularbeit\n1st Written Test");
         assert_eq!(exams[0].end - exams[0].start, 50 * 60);
+    }
+
+    #[test]
+    fn homework_becomes_tasks() {
+        let (items, done) = parse_homework(&json!([
+            {"id": 4357, "subject": "0BWMRW", "assigned": "2026-11-03", "due": "2026-11-09", "text": "Pls. download Excel workbook Acc2-3-1 Trial Balance Assignment and \nthe complete the sheets", "remark": "", "completed": false},
+            {"id": 2, "subject": "0AM", "due": "2026-11-10", "text": "", "remark": "S. 40", "completed": true},
+            {"id": 3, "subject": "0D", "text": "no due date"},
+        ]));
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].ext_id, "untis-hw:4357");
+        assert_eq!(items[0].title, "BWMRW: Pls. download Excel workbook Acc2-3-1 Trial Balance Assignment and");
+        assert_eq!(items[0].due, untis_time("2026-11-09", "08:00").unwrap());
+        assert_eq!((items[1].title.as_str(), items[1].notes.as_str()), ("AM: Homework", "\n\nS. 40"));
+        assert!(done.contains("untis-hw:2") && !done.contains("untis-hw:4357"));
     }
 
     #[test]
