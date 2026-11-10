@@ -1,6 +1,6 @@
 # LockIn
 
-A Neovim-style terminal organizer with tasks, a week planner, a calendar, Obsidian notes, habits and a
+A Neovim-style terminal organizer with tasks, a week planner, a calendar, chats, Obsidian notes and a
 focus timer. It syncs with Moodle, and Claude writes a plan for you every day at the times you choose.
 
 ## Install
@@ -74,7 +74,7 @@ Reminders. It uses no Claude.
 ## What Claude can see and do
 
 Claude runs with all tools turned off, so it can only return text. Assignment text written by other
-people can't make it submit, delete or run anything. It sees your tasks, calendar, habits, focus time
+people can't make it submit, delete or run anything. It sees your tasks, calendar, timetable, focus time
 and unread Moodle notifications. **It never sees your vault notes**, unless you add a file from your notes to
 a chat, and then it sees only that file.
 
@@ -85,7 +85,7 @@ Priorities you set yourself with `+` or `-` are locked, and Claude won't change 
 | What | Where |
 | --- | --- |
 | Settings | The Settings tab, stored in `~/.config/lockin/config.toml` |
-| Tasks, calendar, habits | `~/.local/share/lockin/lockin.db` |
+| Tasks and calendar | `~/.local/share/lockin/lockin.db` |
 | Notes | The folder you chose. `:note` puts new notes in `LockIn/`, and daily notes follow Obsidian's settings if it's a vault |
 | Timer | `~/.config/systemd/user/lockin-daily.{timer,service}` |
 | Timer logs | `journalctl --user -u lockin-daily` |

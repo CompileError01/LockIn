@@ -80,7 +80,6 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::Tasks => draw_tasks(f, app, body),
         View::Calendar => draw_calendar(f, app, body),
         View::Notes => draw_notes(f, app, body),
-        View::Habits => draw_habits(f, app, body),
         View::Focus => draw_focus(f, app, body),
         View::Week => draw_week(f, app, body),
         View::Chats => draw_chats(f, app, body),
@@ -103,9 +102,9 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::styled(" ✻ LockIn ", Style::default().fg(BG).bg(ORANGE).add_modifier(Modifier::BOLD)), Span::raw(" ")];
-    for (i, (view, name)) in VIEWS.iter().enumerate() {
+    for (view, name) in VIEWS.iter() {
         let waiting = app.drafts.iter().filter(|d| d.status == crate::drafts::READY).count();
-        let label = if *view == View::Tasks && waiting > 0 { format!(" {} {name} ✎{waiting} ", i + 1) } else { format!(" {} {name} ", i + 1) };
+        let label = if *view == View::Tasks && waiting > 0 { format!(" {name} ✎{waiting} ") } else { format!(" {name} ") };
         let style = if *view == app.view {
             Style::default().fg(FG).bg(SEL).add_modifier(Modifier::BOLD)
         } else {
@@ -196,7 +195,6 @@ fn prompt_label(p: &Prompt) -> &'static str {
         Prompt::Rename(_) => "rename: ",
         Prompt::VaultFind => "find in vault (↑ ↓ pick, Enter opens): ",
         Prompt::Setting(_) => "value: ",
-        Prompt::NewHabit => "new habit: ",
         Prompt::ChatTitle(_) => "chat name (optional): ",
         Prompt::ChatAsk => "ask claude: ",
         Prompt::DraftFeedback(_) => "what should change? ",
@@ -220,7 +218,6 @@ fn draw_cmdline(f: &mut Frame, app: &App, area: Rect) {
         Mode::Confirm(c) => {
             let q = match c {
                 Confirm::TrashNote(p) => format!("Move {} to the vault's .trash? (y/n)", p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
-                Confirm::DeleteHabit(_, n) => format!("Delete habit {n} and its history? (y/n)"),
                 Confirm::DeleteChat(_, title) => format!("Delete the chat {title} and its messages? Files stay. (y/n)"),
                 Confirm::SaveBooksPassword => "Save this digi4school password on this computer, so you aren't asked again? (y/n)".to_string(),
                 Confirm::DeleteBook(p) => format!("Delete {} from this computer? (y/n)", p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
@@ -566,7 +563,7 @@ fn draw_today(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(brief).wrap(Wrap { trim: false }).scroll((app.preview_scroll, 0)).block(panel(" ✻ Claude's briefing ")), left);
 
     let today_events: Vec<_> = app.events.iter().filter(|e| date_of(e.start) == today()).collect();
-    let extra = today_events.len() as u16 + app.habits.len() as u16;
+    let extra = today_events.len() as u16;
     let lower = if extra > 0 { (extra + 4).min(right.height / 2) } else { 0 };
     let [list, bottom] = Layout::vertical([Constraint::Min(3), Constraint::Length(lower)]).areas(right);
 
@@ -586,16 +583,6 @@ fn draw_today(f: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(vec![
                 Span::styled(format!("{} ", local(e.start).format("%H:%M")), st(ORANGE)),
                 Span::styled(e.title.clone(), st(FG)),
-            ]));
-        }
-        if !today_events.is_empty() && !app.habits.is_empty() {
-            lines.push(Line::default());
-        }
-        for h in &app.habits {
-            let done = h.days.contains(&today());
-            lines.push(Line::from(vec![
-                Span::styled(if done { "● " } else { "○ " }, st(if done { GREEN } else { DIM })),
-                Span::styled(h.name.clone(), st(if done { MUTED } else { FG })),
             ]));
         }
         f.render_widget(Paragraph::new(lines).block(panel(" Today ")), bottom);
@@ -1398,37 +1385,6 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(panel(" About this setting ")), side);
 }
 
-fn draw_habits(f: &mut Frame, app: &App, area: Rect) {
-    if app.habits.is_empty() {
-        return empty(f, area, "No habits yet. Press o to add one, then x to tick it off each day.");
-    }
-    const NAME_W: usize = 24;
-    let mut header = vec![Span::raw(" ".repeat(4 + NAME_W + 1))];
-    for back in (0..14).rev() {
-        let day = today() - Duration::days(back);
-        let label = day.format("%a").to_string().chars().next().unwrap_or(' ');
-        let style = if back == app.habit_col { st(ORANGE).add_modifier(Modifier::BOLD) } else { st(DIM) };
-        header.push(Span::styled(format!("{label} "), style));
-    }
-    header.push(Span::styled("  streak", st(DIM)));
-    let mut rows = vec![Row::Header(Line::from(header))];
-    for h in &app.habits {
-        let mut spans = vec![Span::styled(pad(&h.name, NAME_W), st(FG)), Span::raw(" ")];
-        for back in (0..14).rev() {
-            let done = h.days.contains(&(today() - Duration::days(back)));
-            let mut style = st(if done { ORANGE } else { BORDER });
-            if back == app.habit_col {
-                style = style.add_modifier(Modifier::BOLD).bg(PANEL);
-            }
-            spans.push(Span::styled(if done { "● " } else { "· " }, style));
-        }
-        let streak = h.streak();
-        spans.push(Span::styled(format!("  {streak}d"), st(if streak > 0 { ORANGE } else { DIM })));
-        rows.push(Row::Item(Line::from(spans)));
-    }
-    draw_buffer(f, area, rows, app.sel_habits, true);
-}
-
 const DIGITS: [[&str; 5]; 11] = [
     ["█████", "█   █", "█   █", "█   █", "█████"],
     ["  █  ", "  █  ", "  █  ", "  █  ", "  █  "],
@@ -1873,7 +1829,6 @@ const LEADER_KEYS: &[(&str, &str)] = &[
     ("n", "notes"),
     ("f", "find note"),
     ("d", "daily note"),
-    ("h", "habits"),
     ("w", "week planner"),
     ("p", "focus timer"),
     ("C", "chats"),
@@ -1960,9 +1915,6 @@ j k  scroll   J K or Space  page   12G  go to page 12   gg G  first, last
 + -  zoom   0  reset   w  fit width   h l  pan   t  text view
 /  find text   n N  next, previous   o  default app   q  back
 
-# Habits
-x  tick the selected day   h l  pick a day   o  new   dd  delete
-
 # Focus
 s  start   p  pause   b  break   x  stop   + -  change by 5 min
 gf on a task starts a session tied to that task.
@@ -1981,7 +1933,7 @@ Only the files you add go to Claude.
 j k  move   Enter or x  change   h l  step a value
 
 # Commands
-:sync   :brief   :add ...   :event ...   :note name   :daily   :habit name
+:sync   :brief   :add ...   :event ...   :note name   :daily
 :drafts   :focus 25   :stop   :filter moodle   :notify   :moodle   :pdf file   :week   :plan   :chats   :learn   :books   :settings   :q
 
 # Texting LockIn from your phone
@@ -1998,7 +1950,6 @@ pub fn help_offset(view: View, drafts_open: bool) -> u16 {
         View::Week => "# Week",
         View::Calendar => "# Calendar",
         View::Notes => "# Notes",
-        View::Habits => "# Habits",
         View::Focus => "# Focus",
         View::Chats => "# Chats",
         View::Settings => "# Settings",
@@ -2173,9 +2124,6 @@ mod tests {
         assert!(!app.tasks.iter().any(|t| t.title == "Study"));
         press(&mut app, ":cal\n");
         app.cal_date = tomorrow;
-
-        press(&mut app, ":habit Lesen\n:habits\nx");
-        assert_eq!(app.habits[0].streak(), 1);
 
         // Browse into a folder, filter it, and come back with the folder still selected.
         press(&mut app, ":notes\n");

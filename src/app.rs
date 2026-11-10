@@ -1,6 +1,6 @@
 use crate::chats::{ChatsState, Level as ChatLevel};
 use crate::config::{config_path, db_path, find_bin, Config};
-use crate::db::{Briefing, Db, Event, Habit, InboxItem, Lesson, Task};
+use crate::db::{Briefing, Db, Event, InboxItem, Lesson, Task};
 use crate::planner;
 use crate::files::{self, Browser, Entry, Preview, Sort, Yank};
 use crate::form::{self, Form, Target};
@@ -21,22 +21,20 @@ pub enum View {
     Tasks,
     Week,
     Calendar,
-    Notes,
-    Habits,
-    Focus,
     Chats,
+    Notes,
+    Focus,
     Settings,
 }
 
-pub const VIEWS: [(View, &str); 9] = [
+pub const VIEWS: [(View, &str); 8] = [
     (View::Today, "Today"),
     (View::Tasks, "Tasks"),
     (View::Week, "Week"),
     (View::Calendar, "Calendar"),
-    (View::Notes, "Notes"),
-    (View::Habits, "Habits"),
-    (View::Focus, "Focus"),
     (View::Chats, "Chats"),
+    (View::Notes, "Notes"),
+    (View::Focus, "Focus"),
     (View::Settings, "Settings"),
 ];
 
@@ -50,7 +48,6 @@ pub enum Prompt {
     NewNote,
     Rename(PathBuf),
     VaultFind,
-    NewHabit,
     ChatTitle(Option<i64>),
     ChatAsk,
     DraftFeedback(i64),
@@ -62,7 +59,6 @@ pub enum Prompt {
 #[derive(Clone, PartialEq, Debug)]
 pub enum Confirm {
     TrashNote(PathBuf),
-    DeleteHabit(i64, String),
     DeleteAgenda(String),
     DeleteTutorNote(PathBuf),
     RestartLesson(usize),
@@ -226,7 +222,6 @@ pub struct App {
 
     pub tasks: Vec<Task>,
     pub events: Vec<Event>,
-    pub habits: Vec<Habit>,
     pub inbox: Vec<InboxItem>,
     pub briefing: Option<Briefing>,
     pub notes: Vec<NoteEntry>,
@@ -236,11 +231,9 @@ pub struct App {
     pub sel_today: usize,
     pub sel_tasks: usize,
     pub sel_notes: usize,
-    pub sel_habits: usize,
     pub sel_week: usize,
     pub planning: bool,
     pub sel_agenda: usize,
-    pub habit_col: i64,
     pub cal_date: NaiveDate,
     pub filter: TaskFilter,
     pub show_done: bool,
@@ -278,7 +271,7 @@ pub struct App {
 }
 
 const COMMANDS: &[&str] = &[
-    "add", "brief", "books", "calendar", "chats", "config", "daily", "drafts", "event", "filter", "focus", "habit", "habits", "help", "learn", "moodle", "note",
+    "add", "brief", "books", "calendar", "chats", "config", "daily", "drafts", "event", "filter", "focus", "help", "learn", "moodle", "note",
     "notes", "notify", "pdf", "plan", "q", "qa", "settings", "stop", "sync", "tasks", "today", "w", "week", "wq",
 ];
 
@@ -324,7 +317,6 @@ impl App {
             help_scroll: 0,
             tasks: vec![],
             events: vec![],
-            habits: vec![],
             inbox: vec![],
             briefing: None,
             notes: vec![],
@@ -333,11 +325,9 @@ impl App {
             sel_today: 0,
             sel_tasks: 0,
             sel_notes: 0,
-            sel_habits: 0,
             sel_week: 0,
             planning: false,
             sel_agenda: 0,
-            habit_col: 0,
             cal_date: today(),
             filter: TaskFilter::All,
             show_done: false,
@@ -377,7 +367,6 @@ impl App {
     pub fn reload(&mut self) -> Result<()> {
         self.tasks = self.db.tasks()?;
         self.events = self.db.events()?;
-        self.habits = self.db.habits()?;
         self.inbox = self.db.inbox()?;
         self.briefing = self.db.latest_briefing()?;
         self.focus_today = self.db.focus_minutes_today()?;
@@ -508,7 +497,6 @@ impl App {
             View::Tasks if self.drafts_open => self.drafts.len(),
             View::Tasks => self.visible_tasks().len(),
             View::Notes => self.visible_entries().len(),
-            View::Habits => self.habits.len(),
             View::Settings => settings::ROWS.len(),
             View::Chats => self.chats_len(),
             View::Week | View::Calendar | View::Focus => 0,
@@ -521,7 +509,6 @@ impl App {
             View::Tasks if self.drafts_open => Some(&mut self.sel_drafts),
             View::Tasks => Some(&mut self.sel_tasks),
             View::Notes => Some(&mut self.sel_notes),
-            View::Habits => Some(&mut self.sel_habits),
             View::Settings => Some(&mut self.sel_settings),
             View::Chats => self.chats_sel_mut(),
             View::Week | View::Calendar | View::Focus => None,
@@ -533,7 +520,6 @@ impl App {
         self.sel_today = self.sel_today.min(last(self.today_tasks().len()));
         self.sel_tasks = self.sel_tasks.min(last(self.visible_tasks().len()));
         self.sel_notes = self.sel_notes.min(last(self.visible_entries().len()));
-        self.sel_habits = self.sel_habits.min(last(self.habits.len()));
         self.sel_drafts = self.sel_drafts.min(last(self.drafts.len()));
         self.sel_agenda = self.sel_agenda.min(last(self.agenda(self.cal_date).len()));
         self.clamp_chats();
@@ -821,11 +807,6 @@ impl App {
                 self.attempt(r);
                 self.scan_notes();
             }
-            Confirm::DeleteHabit(id, name) => {
-                let r = self.db.delete_habit(id);
-                self.attempt(r);
-                self.info(format!("Deleted habit {name}"));
-            }
             Confirm::SubmitDraft(id) => self.submit_draft(id),
             Confirm::DiscardDraft(id) => {
                 let r = crate::drafts::discard(&self.db, id);
@@ -1092,7 +1073,6 @@ impl App {
             Prompt::NewNote => self.create_entry(&text),
             Prompt::Rename(path) => self.rename_entry(&path, &text),
             Prompt::Setting(key) => self.set_setting_text(key, &text),
-            Prompt::NewHabit => self.db.add_habit(&text),
         };
         self.attempt(result);
     }
@@ -1352,7 +1332,6 @@ impl App {
             "settings" | "set" => self.switch(View::Settings),
             "moodle" => self.want_editor = Some(EditTarget::MoodleApp),
             "notes" => self.switch(View::Notes),
-            "habits" => self.switch(View::Habits),
             "week" => self.switch(View::Week),
             "plan" => self.start_plan(),
             "chats" => self.switch(View::Chats),
@@ -1388,8 +1367,6 @@ impl App {
             "note" if !arg.is_empty() => self.new_note(arg)?,
             "note" => bail!("Usage: :note name"),
             "daily" => self.open_daily()?,
-            "habit" if !arg.is_empty() => self.db.add_habit(arg)?,
-            "habit" => bail!("Usage: :habit name"),
             "focus" => {
                 let minutes = if arg.is_empty() { self.cfg.focus_minutes } else { arg.parse().unwrap_or(0) };
                 if minutes <= 0 {
@@ -1576,7 +1553,6 @@ impl App {
             (' ', 'T') => self.switch(View::Tasks),
             (' ', 'c') => self.switch(View::Calendar),
             (' ', 'n') => self.switch(View::Notes),
-            (' ', 'h') => self.switch(View::Habits),
             (' ', 'w') => self.switch(View::Week),
             (' ', 'p') => self.switch(View::Focus),
             (' ', 'f') => {
@@ -1645,11 +1621,6 @@ impl App {
             View::Calendar => return self.on_calendar_key(c, times),
             View::Focus => return self.on_focus_key(c),
             View::Week => return self.on_week_key(c, times),
-            View::Habits => {
-                if self.on_habit_key(c) {
-                    return;
-                }
-            }
             View::Settings => {
                 if self.on_settings_key(c) {
                     return;
@@ -1761,11 +1732,6 @@ impl App {
                 }
                 None => {}
             },
-            View::Habits => {
-                if let Some(h) = self.habits.get(self.sel_habits) {
-                    self.mode = Mode::Confirm(Confirm::DeleteHabit(h.id, h.name.clone()));
-                }
-            }
             _ => {}
         }
     }
@@ -2320,23 +2286,6 @@ impl App {
             Ok(()) => self.info(format!("{}: {}", settings::label(key), settings::value(&self.cfg, key))),
             Err(e) => self.error(format!("Saved, but the schedule wasn't updated: {e}")),
         }
-    }
-
-    fn on_habit_key(&mut self, c: char) -> bool {
-        match c {
-            'o' | 'a' => self.open_prompt(Prompt::NewHabit, ""),
-            'x' => {
-                if let Some(h) = self.habits.get(self.sel_habits) {
-                    let (id, day) = (h.id, today() - Duration::days(self.habit_col));
-                    let r = self.db.toggle_habit(id, day);
-                    self.attempt(r);
-                }
-            }
-            'h' => self.habit_col = (self.habit_col + 1).min(13),
-            'l' => self.habit_col = (self.habit_col - 1).max(0),
-            _ => return false,
-        }
-        true
     }
 
     // ---- focus ------------------------------------------------------------

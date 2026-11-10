@@ -113,29 +113,6 @@ impl Event {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Habit {
-    pub id: i64,
-    pub name: String,
-    pub days: HashSet<NaiveDate>,
-}
-
-impl Habit {
-    /// Days in a row, ending today, or yesterday while today is still open.
-    pub fn streak(&self) -> i64 {
-        let mut day = today();
-        if !self.days.contains(&day) {
-            day -= Duration::days(1);
-        }
-        let mut n = 0;
-        while self.days.contains(&day) {
-            n += 1;
-            day -= Duration::days(1);
-        }
-        n
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Lesson {
     pub id: i64,
@@ -344,40 +321,6 @@ impl Db {
 
     pub fn delete_event(&self, id: i64) -> Result<()> {
         self.c.execute("DELETE FROM events WHERE id=?1", [id])?;
-        Ok(())
-    }
-
-    // ---- habits -----------------------------------------------------------
-
-    pub fn habits(&self) -> Result<Vec<Habit>> {
-        let mut st = self.c.prepare("SELECT id,name FROM habits ORDER BY id")?;
-        let base: Vec<(i64, String)> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
-        let mut log = self.c.prepare("SELECT day FROM habit_log WHERE habit_id=?1")?;
-        let mut out = Vec::new();
-        for (id, name) in base {
-            let days: Vec<String> = log.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-            let days = days.iter().filter_map(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).collect();
-            out.push(Habit { id, name, days });
-        }
-        Ok(out)
-    }
-
-    pub fn add_habit(&self, name: &str) -> Result<()> {
-        self.c.execute("INSERT INTO habits(name,created_at) VALUES(?1,?2)", params![name, now_ts()])?;
-        Ok(())
-    }
-
-    pub fn delete_habit(&self, id: i64) -> Result<()> {
-        self.c.execute("DELETE FROM habits WHERE id=?1", [id])?;
-        Ok(())
-    }
-
-    pub fn toggle_habit(&self, id: i64, day: NaiveDate) -> Result<()> {
-        let d = day.format("%Y-%m-%d").to_string();
-        let removed = self.c.execute("DELETE FROM habit_log WHERE habit_id=?1 AND day=?2", params![id, d])?;
-        if removed == 0 {
-            self.c.execute("INSERT INTO habit_log(habit_id,day) VALUES(?1,?2)", params![id, d])?;
-        }
         Ok(())
     }
 
@@ -693,21 +636,5 @@ mod tests {
         let today_lessons = d.lessons_on(crate::timeutil::date_of(b)).unwrap();
         assert_eq!(today_lessons.iter().map(|l| l.id).collect::<Vec<_>>(), vec![2], "a dropped lesson goes");
         assert_eq!(d.lessons_end(), Some(now + 999));
-    }
-
-    #[test]
-    fn habit_streak_counts_back_from_today_or_yesterday() {
-        let d = db();
-        d.add_habit("read").unwrap();
-        let h = d.habits().unwrap()[0].id;
-        d.toggle_habit(h, today() - Duration::days(1)).unwrap();
-        d.toggle_habit(h, today() - Duration::days(2)).unwrap();
-        d.toggle_habit(h, today() - Duration::days(4)).unwrap();
-        assert_eq!(d.habits().unwrap()[0].streak(), 2);
-        d.toggle_habit(h, today()).unwrap();
-        assert_eq!(d.habits().unwrap()[0].streak(), 3);
-        d.toggle_habit(h, today()).unwrap();
-        d.toggle_habit(h, today() - Duration::days(1)).unwrap();
-        assert_eq!(d.habits().unwrap()[0].streak(), 0);
     }
 }

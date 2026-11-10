@@ -380,11 +380,6 @@ pub fn context_json(db: &Db) -> Result<Value> {
         .filter(|e| e.end >= now - 3600 && e.start <= now + 8 * 86400)
         .map(|e| json!({"title": e.title, "start": fmt_abs(e.start), "location": e.location, "course": e.course}))
         .collect();
-    let habits: Vec<Value> = db
-        .habits()?
-        .iter()
-        .map(|h| json!({"name": h.name, "done_today": h.days.contains(&today()), "streak_days": h.streak()}))
-        .collect();
     let mut timetable = Vec::new();
     for offset in 0..3 {
         let day = today() + chrono::Duration::days(offset);
@@ -400,7 +395,6 @@ pub fn context_json(db: &Db) -> Result<Value> {
         "open_tasks": open,
         "calendar_next_8_days": events,
         "timetable_next_3_days": timetable,
-        "habits": habits,
         "unread_moodle_notifications": inbox,
         "focus_minutes_today": db.focus_minutes_today()?,
     }))
